@@ -1,5 +1,6 @@
 use std::{
     borrow::{Borrow, BorrowMut},
+    env::{split_paths, var_os},
     ops::{Deref, DerefMut, Range},
     process::Stdio,
     sync::Arc,
@@ -7,21 +8,59 @@ use std::{
 };
 
 use anyhow::Result;
+use async_tls::TlsConnector;
+use futures::Future;
 
 use crate::node::Node;
-use reqwest::Proxy;
 
 use serde_json::json;
-use smol::stream::StreamExt;
 use smol::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     lock::Mutex,
+    net::TcpStream,
     process::Child,
 };
+use smol::{lock::Semaphore, stream::StreamExt};
 
 pub struct V2rayProperty {
     pub bin_path: String,
-    pub config_path: String,
+    pub config_path: Option<String>,
+    pub concurr_num: usize,
+}
+
+impl Default for V2rayProperty {
+    /// 设置bin path为PATH中的v2ra，，config置为Non，，concurr_num
+    /// 设为cpu_nums
+    ///
+    /// # panic
+    ///
+    /// 如果未在PATH中找到v2ray
+    fn default() -> Self {
+        let exe_name = "v2ray";
+        let bin_path = var_os("PATH")
+            .and_then(|val| {
+                log::debug!("env path: {:?}", val.to_str());
+                split_paths(&val).find_map(|path| {
+                    if path.is_file() && path.ends_with(exe_name) {
+                        return Some(path);
+                    }
+                    let path = path.join(exe_name);
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                    None
+                })
+            })
+            .and_then(|path| path.to_str().map(|s| s.to_owned()))
+            .unwrap_or_else(|| panic!("not found v2ray in env var PATH"));
+        log::debug!("found v2ray bin path: {}", bin_path);
+
+        Self {
+            bin_path,
+            config_path: None,
+            concurr_num: num_cpus::get(),
+        }
+    }
 }
 
 pub struct PingProperty {
@@ -29,6 +68,7 @@ pub struct PingProperty {
     pub max_port: u16,
     pub min_port: u16,
     pub ping_url: String,
+    pub timeout: Duration,
 }
 
 impl Default for PingProperty {
@@ -38,6 +78,7 @@ impl Default for PingProperty {
             max_port: 60000,
             min_port: 50000,
             ping_url: "https://www.google.com/gen_204".into(),
+            timeout: Duration::from_secs(3),
         }
     }
 }
@@ -78,12 +119,15 @@ pub struct V2rayRef {
     local_ports: Mutex<Range<u16>>,
     ping_property: PingProperty,
     v2ray_property: V2rayProperty,
+    // 限制v2ray并发启动个数
+    semaphore: Semaphore,
 }
 
 impl V2rayRef {
     pub fn new(pp: PingProperty, vp: V2rayProperty) -> Self {
         V2rayRef {
             local_ports: Mutex::new(pp.min_port..pp.max_port),
+            semaphore: Semaphore::new(vp.concurr_num),
             ping_property: pp,
             v2ray_property: vp,
         }
@@ -96,6 +140,7 @@ impl V2rayRef {
             .arg("stdin:")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
 
         // 写完stdin后drop避免阻塞
@@ -124,53 +169,58 @@ impl V2rayRef {
     }
 
     /// 应用node到配置中启动v2ray并执行tcp ping
-    pub async fn tcp_ping<'a>(&self, node: &'a Node) -> Result<TcpPingStatistic> {
+    pub async fn tcp_ping(&self, node: &Node) -> Result<TcpPingStatistic> {
+        log::debug!("waiting for semaphore");
+        let _guard = self.semaphore.acquire().await;
+        log::info!("acquired semaphore: {:?}", _guard);
+
         // 0. load config
         let local_port = self.next_local_port().await;
         let config = gen_tcp_ping_config(node, local_port);
 
         // 1. start v2ray and hold on
         let mut _child = self.start(&config).await?;
+
         // print v2ray output for debug
-        // {
-        //     let out = _child.stdout.take().unwrap();
-        //     let mut reader = BufReader::new(out).lines();
-        //     smol::spawn(async move {
-        //         while let Some(line) = reader.next().await {
-        //             log::debug!("ping v2ray line: {}", line.expect("read line error"));
-        //         }
-        //     })
-        //     .detach();
-        // }
+        if log::log_enabled!(log::Level::Debug) {
+            let out = _child.stdout.take().unwrap();
+            let mut reader = BufReader::new(out).lines();
+            smol::spawn(async move {
+                while let Some(line) = reader.next().await {
+                    log::debug!("ping v2ray line: {}", line.expect("read line error"));
+                }
+            })
+            .detach();
+        }
 
         // 3. send request to check
         let count = self.ping_property.count;
         let url = &self.ping_property.ping_url;
         let mut durations: Vec<Option<Duration>> = vec![None; count as usize];
 
-        futures::executor::block_on(async_compat::Compat::new(async {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(count as usize);
-            for i in 0..count {
-                let url = url.clone();
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let duration = measure_duration_with_proxy(&url, local_port)
-                        .await
-                        .map(Some)
-                        .unwrap_or_else(|e| {
-                            log::info!("not found duration: {}", e);
-                            None
-                        });
-                    tx.send((i, duration)).await.unwrap();
-                });
-            }
-            log::debug!("waiting for measure duration tasks: {}", count);
-            for _ in 0..count {
-                let (i, du) = rx.recv().await.unwrap();
-                log::debug!("received task: ({}, {:?})", i, du);
-                durations[i as usize] = du;
-            }
-        }));
+        let (tx, mut rx) = smol::channel::bounded(1);
+        for i in 0..count {
+            let url = url.clone();
+            let tx = tx.clone();
+            smol::spawn(async move {
+                let duration = measure_duration_with_proxy_run(&url, local_port)
+                    .await
+                    .map(Some)
+                    .unwrap_or_else(|e| {
+                        log::debug!("not found duration: {}", e);
+                        None
+                    });
+                tx.send((i, duration)).await.unwrap();
+            })
+            .detach();
+        }
+
+        log::debug!("waiting for measure duration tasks: {}", count);
+        for _ in 0..count {
+            let (i, du) = rx.recv().await.unwrap();
+            log::debug!("received task: ({}, {:?})", i, du);
+            durations[i as usize] = du;
+        }
 
         log::debug!(
             "tcp ping node: {:?} has durations: {:?}",
@@ -190,26 +240,52 @@ impl V2rayRef {
     }
 }
 
-/// 使用本地v2ray port测量http get url的时间
-async fn measure_duration_with_proxy(url: &str, proxy_port: u16) -> reqwest::Result<Duration> {
+use async_h1::client;
+use http_types::Version;
+use http_types::{Error, Method, Request, Url};
+
+async fn measure_duration_with_proxy_run(url: &str, proxy_port: u16) -> anyhow::Result<Duration> {
     log::debug!(
         "sending get request url: {},  with localhost socks5 proxy port: {}",
         url,
         proxy_port
     );
 
-    let client = reqwest::Client::builder()
-        .proxy(Proxy::https(&format!("socks5://127.0.0.1:{}", proxy_port))?)
-        .build()?;
+    let tcp_stream = TcpStream::connect(format!("127.0.0.1:{}", proxy_port)).await?;
+    let url = Url::parse(url)?;
+
+    let mut req = Request::new(Method::Connect, url.clone());
+    req.set_version(Some(Version::Http1_1));
+    req.insert_header("User-Agent", "curl/7.69.1");
+
+    let resp = client::connect(tcp_stream.clone(), req).await.unwrap();
+    assert!(resp.status().is_success());
+
+    // let s = TcpStream::connect("google.com:80").await?;
+
+    let mut req = Request::new(Method::Get, url);
+    req.set_version(Some(Version::Http1_1));
+    req.insert_header("User-Agent", "curl/7.69.1");
+    req.insert_header("Accept", "*/*");
 
     let start = Instant::now();
-    let status = client.get(url).send().await?.status();
-    let duration = Instant::now() - start;
-
-    if status.as_u16() >= 400 {
-        log::warn!("request {} has error status: {}", url, status);
+    let resp = match req.url().scheme() {
+        "http" => client::connect(tcp_stream, req).await,
+        "https" => {
+            let stream = TlsConnector::default()
+                .connect(req.host().unwrap(), tcp_stream)
+                .await?;
+            client::connect(stream, req).await
+        }
+        _ => panic!("unsupported for proxy url scheme: {}", req.url()),
     }
-    log::debug!("request {} has duration: {}ms", url, duration.as_millis());
+    .map_err(|e| e.into_inner())?;
+
+    let duration = Instant::now() - start;
+    let status = resp.status();
+    if !status.is_success() {
+        log::warn!("error status: {}", status);
+    }
     Ok(duration)
 }
 
@@ -304,7 +380,55 @@ fn gen_load_balance_config(nodes: &[&Node], local_port: u16) -> String {
 }
 
 fn gen_tcp_ping_config(node: &Node, local_port: u16) -> String {
-    gen_load_balance_config(&[node], local_port)
+    json!({
+        "log": {
+            "loglevel": "debug"
+        },
+        "inbound": {
+            "settings": {
+                "timeout": 0,
+                "allowTransparent": false,
+                "userLevel": 0
+            },
+            "protocol": "http",
+            "port": local_port,
+            "sniffing": {
+                "enabled": true,
+                "destOverride": [
+                    "http",
+                    "tls"
+                ]
+            },
+            "listen": "127.0.0.1"
+        },
+        "outbound": {
+            "settings": {
+                "vnext": [
+                    {
+                        "address": node.add.as_ref().expect("not found address"),
+                        "port": node.port.as_ref().expect("not found port"),
+                        "users": [
+                            {
+                                "id": node.id.as_ref().expect("not found id"),
+                                "alterId": node.aid.as_ref().expect("not found alter_id")
+                            }
+                        ]
+                    }
+                ]
+            },
+            "protocol": "vmess",
+            "streamSettings": {
+                "wsSettings": {
+                    "path": node.path.as_ref().expect("not found path"),
+                    "headers": {
+                        "host": node.host.as_ref().expect("not found host")
+                    }
+                },
+                "network": "ws"
+            }
+        }
+    })
+    .to_string()
 }
 
 #[cfg(test)]
@@ -315,15 +439,6 @@ mod v2ray_tests {
     use super::*;
     use log::LevelFilter;
     use serde_json::Value;
-
-    impl Default for V2rayProperty {
-        fn default() -> Self {
-            V2rayProperty {
-                bin_path: "/home/navyd/Downloads/v2ray/v2ray".into(),
-                config_path: "/home/navyd/Downloads/v2ray/v2-config.json".into(),
-            }
-        }
-    }
 
     #[test]
     fn gen_config_nodes() -> Result<()> {
@@ -374,7 +489,7 @@ mod v2ray_tests {
             let mut child = v2ray.start(&config).await?;
 
             futures::executor::block_on(async_compat::Compat::new(async {
-                measure_duration_with_proxy(&v2ray.ping_property.ping_url, local_port)
+                measure_duration_with_proxy_run(&v2ray.ping_property.ping_url, local_port)
                     .await
                     .expect("get duration error");
             }));
@@ -438,7 +553,13 @@ mod v2ray_tests {
     }
 
     fn get_v2ray() -> V2rayRef {
-        V2rayRef::new(PingProperty::default(), V2rayProperty::default())
+        V2rayRef::new(
+            PingProperty::default(),
+            V2rayProperty {
+                config_path: Some("/home/navyd/Downloads/v2ray/v2-config-test.json".to_owned()),
+                ..Default::default()
+            },
+        )
     }
 
     fn get_node() -> Node {

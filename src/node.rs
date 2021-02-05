@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use futures::AsyncReadExt;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
