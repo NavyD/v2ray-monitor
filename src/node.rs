@@ -27,7 +27,7 @@ pub struct Node {
 }
 
 pub async fn load_subscription_nodes_from_file<T: AsRef<Path>>(path: T) -> Result<Vec<Node>> {
-    let buf = smol::fs::read(path).await?;
+    let buf = tokio::fs::read(path).await?;
     parse_subscription_nodes(buf)
 }
 
@@ -86,18 +86,13 @@ mod node_tests {
         Ok(())
     }
 
-    #[test]
-    fn load_subscription_nodes_from_file_test() {
-        async fn test() -> Result<()> {
-            let path =
-                "/home/navyd/Workspaces/projects/tasks/src/test/resources/V2RayN_1611312530.txt";
-            let nodes = load_subscription_nodes_from_file(path).await?;
-            assert_eq!(nodes.len(), 147);
-            Ok(())
-        }
-        smol::block_on(async {
-            test().await.unwrap();
-        });
+    // #[test]
+    #[tokio::test]
+    async fn load_subscription_nodes_from_file_test() -> Result<()> {
+        let path = "/home/navyd/Workspaces/projects/tasks/src/test/resources/V2RayN_1611312530.txt";
+        let nodes = load_subscription_nodes_from_file(path).await?;
+        assert_eq!(nodes.len(), 147);
+        Ok(())
     }
 
     #[test]

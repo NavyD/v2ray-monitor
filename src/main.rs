@@ -1,3 +1,4 @@
+use tokio::sync::mpsc::channel;
 // use surf::{Client, Request, Response, http::headers::FORWARDED, middleware::{Middleware, Next}};
 use v2ray::{PingProperty, V2ray, V2rayProperty};
 
@@ -5,15 +6,12 @@ mod config;
 mod node;
 mod v2ray;
 
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .init();
-    smol::block_on(async {
-        run().await.unwrap();
-        // let mut res = surf::get("https://www.google.com").header(FORWARDED, r#"proto=http;by=127.0.0.1:1080"#).await.unwrap();
-        // dbg!(res.body_string().await.unwrap());
-    });
+    run().await
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -21,7 +19,7 @@ async fn run() -> anyhow::Result<()> {
     let mut nodes = node::load_subscription_nodes_from_file(path).await?;
     let pp = PingProperty::default();
     let vp = V2rayProperty::default();
-    let (tx, rx) = smol::channel::bounded(1);
+    let (tx, mut rx) = channel(1);
     let v2ray = V2ray::new(pp, vp);
     let count = nodes.len();
 
@@ -33,12 +31,11 @@ async fn run() -> anyhow::Result<()> {
         // log::info!("{} stats: {:?}", node.remark.unwrap(), stats);
         // tx.send(stats).await.unwrap();
 
-        smol::spawn(async move {
-            let stats = v2ray.tcp_ping(&node).await.unwrap();
+        tokio::spawn(async move {
+            let stats = v2ray.tcp_ping(&node).await;
             log::info!("{} stats: {:?}", node.remark.unwrap(), stats);
             tx.send(stats).await.unwrap();
-        })
-        .detach();
+        });
     }
     for i in 0..count {
         let stats = rx.recv().await.unwrap();

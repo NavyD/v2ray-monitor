@@ -1,5 +1,5 @@
 use std::{
-    borrow::{Borrow},
+    borrow::Borrow,
     env::{split_paths, var_os},
     ops::{Deref, Range},
     process::Stdio,
@@ -7,19 +7,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
-use async_tls::TlsConnector;
+use anyhow::{Result, anyhow};
+use reqwest::Proxy;
+use tokio::{
+    io::*,
+    process::{Child, Command},
+    sync::{Mutex, Semaphore},
+};
 
 use crate::node::Node;
 
 use serde_json::json;
-use smol::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    lock::Mutex,
-    net::TcpStream,
-    process::Child,
-};
-use smol::{lock::Semaphore, stream::StreamExt};
 
 pub struct V2rayProperty {
     pub bin_path: String,
@@ -134,7 +132,7 @@ impl V2rayRef {
 
     /// 加载配置config启动v2ray并返回v2ray子进程
     pub async fn start(&self, config: &str) -> Result<Child> {
-        let mut child = smol::process::Command::new(&self.v2ray_property.bin_path)
+        let mut child = Command::new(&self.v2ray_property.bin_path)
             .arg("-config")
             .arg("stdin:")
             .stdin(Stdio::piped())
@@ -156,8 +154,7 @@ impl V2rayRef {
         // take(): error trying to connect: Connection reset by peer (os error 104)
         let out = child.stdout.as_mut().expect("not found child stdout");
         let mut reader = BufReader::new(out).lines();
-        while let Some(line) = reader.next().await {
-            let line = line.expect("read line error");
+        while let Some(line) = reader.next_line().await? {
             log::debug!("v2ray stdout line: {}", line);
             if line.contains("started") && line.contains("v2ray.com/core: V2Ray") {
                 break;
@@ -169,13 +166,12 @@ impl V2rayRef {
 
     /// 应用node到配置中启动v2ray并执行tcp ping
     pub async fn tcp_ping(&self, node: &Node) -> Result<TcpPingStatistic> {
-        log::debug!("waiting for semaphore");
         let _guard = self.semaphore.acquire().await;
         log::info!("acquired semaphore: {:?}", _guard);
 
         // 0. load config
         let local_port = self.next_local_port().await;
-        let config = gen_tcp_ping_config(node, local_port);
+        let config = gen_tcp_ping_config(node, local_port)?;
 
         // 1. start v2ray and hold on
         let mut _child = self.start(&config).await?;
@@ -184,25 +180,26 @@ impl V2rayRef {
         if log::log_enabled!(log::Level::Debug) {
             let out = _child.stdout.take().unwrap();
             let mut reader = BufReader::new(out).lines();
-            smol::spawn(async move {
-                while let Some(line) = reader.next().await {
-                    log::debug!("ping v2ray line: {}", line.expect("read line error"));
+            tokio::spawn(async move {
+                while let Some(line) = reader.next_line().await.unwrap_or_else(|e| panic!("{}", e))
+                {
+                    log::debug!("ping v2ray line: {}", line);
                 }
-            })
-            .detach();
+            });
         }
 
         // 3. send request to check
         let count = self.ping_property.count;
         let url = &self.ping_property.ping_url;
+        let timeout = self.ping_property.timeout;
         let mut durations: Vec<Option<Duration>> = vec![None; count as usize];
 
-        let (tx, rx) = smol::channel::bounded(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         for i in 0..count {
             let url = url.clone();
             let tx = tx.clone();
-            smol::spawn(async move {
-                let duration = measure_duration_with_proxy_run(&url, local_port)
+            tokio::spawn(async move {
+                let duration = measure_duration_with_proxy(&url, local_port, timeout)
                     .await
                     .map(Some)
                     .unwrap_or_else(|e| {
@@ -210,8 +207,7 @@ impl V2rayRef {
                         None
                     });
                 tx.send((i, duration)).await.unwrap();
-            })
-            .detach();
+            });
         }
 
         log::debug!("waiting for measure duration tasks: {}", count);
@@ -233,52 +229,31 @@ impl V2rayRef {
     }
 }
 
-use async_h1::client;
-use http_types::Version;
-use http_types::{Method, Request, Url};
-
-async fn measure_duration_with_proxy_run(url: &str, proxy_port: u16) -> anyhow::Result<Duration> {
+/// 使用本地v2ray port测量http get url的时间
+async fn measure_duration_with_proxy(
+    url: &str,
+    proxy_port: u16,
+    timeout: Duration,
+) -> reqwest::Result<Duration> {
     log::debug!(
         "sending get request url: {},  with localhost socks5 proxy port: {}",
         url,
         proxy_port
     );
 
-    let tcp_stream = TcpStream::connect(format!("127.0.0.1:{}", proxy_port)).await?;
-    let url = Url::parse(url)?;
-
-    let mut req = Request::new(Method::Connect, url.clone());
-    req.set_version(Some(Version::Http1_1));
-    req.insert_header("User-Agent", "curl/7.69.1");
-
-    let resp = client::connect(tcp_stream.clone(), req).await.unwrap();
-    assert!(resp.status().is_success());
-
-    // let s = TcpStream::connect("google.com:80").await?;
-
-    let mut req = Request::new(Method::Get, url);
-    req.set_version(Some(Version::Http1_1));
-    req.insert_header("User-Agent", "curl/7.69.1");
-    req.insert_header("Accept", "*/*");
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .proxy(Proxy::https(&format!("socks5://127.0.0.1:{}", proxy_port))?)
+        .build()?;
 
     let start = Instant::now();
-    let resp = match req.url().scheme() {
-        "http" => client::connect(tcp_stream, req).await,
-        "https" => {
-            let stream = TlsConnector::default()
-                .connect(req.host().unwrap(), tcp_stream)
-                .await?;
-            client::connect(stream, req).await
-        }
-        _ => panic!("unsupported for proxy url scheme: {}", req.url()),
-    }
-    .map_err(|e| e.into_inner())?;
-
+    let status = client.get(url).send().await?.status();
     let duration = Instant::now() - start;
-    let status = resp.status();
-    if !status.is_success() {
-        log::warn!("error status: {}", status);
+
+    if status.as_u16() >= 400 {
+        log::warn!("request {} has error status: {}", url, status);
     }
+    log::debug!("request {} has duration: {}ms", url, duration.as_millis());
     Ok(duration)
 }
 
@@ -290,33 +265,38 @@ async fn measure_duration_with_proxy_run(url: &str, proxy_port: u16) -> anyhow::
 /// * node.host不一致时
 /// * node.net不是`ws`类型时
 /// * node关键字段中存在None
-fn gen_load_balance_config(nodes: &[&Node], local_port: u16) -> String {
+fn gen_load_balance_config(nodes: &[&Node], local_port: u16) -> Result<String> {
     if nodes.is_empty() {
         panic!("nodes is empty");
     }
     // check nodes
-    {
-        let host = nodes[0].host.as_deref();
-        let discord_nodes = nodes
-            .iter()
-            .map(|node| {
-                // check node net type
-                match node.net.as_deref() {
-                    Some("ws") => node.host.as_deref(),
-                    _ => panic!("unsupported node net type: {:?}", node.net),
-                }
-            })
-            .filter(|other| other != &host)
-            .collect::<Vec<_>>();
-        if !discord_nodes.is_empty() {
-            log::error!(
-                "There are nodes with inconsistent hosts: {:?}, host: {:?}",
-                discord_nodes,
-                host
-            );
-            panic!("inconsistent hosts: {:?}", nodes);
-        }
+    let host = nodes[0].host.as_deref();
+    let nodes = nodes
+        .iter()
+        .filter(|node| {
+            // check node net type
+            if node.net.as_deref() == Some("ws") && node.host.as_deref() == host {
+                true
+            } else {
+                log::info!(
+                    "filtered unsupported node: {:?}. by net type: {:?}, or host: {:?}",
+                    node.remark,
+                    node.net,
+                    node.host
+                );
+                false
+            }
+        })
+        .collect::<Vec<_>>();
+    if nodes.is_empty() {
+        log::error!(
+            "There are nodes with inconsistent hosts: {:?}, host: {:?}",
+            nodes,
+            host
+        );
+        return Err(anyhow!("no any valid nodes"));
     }
+
     let next_items = nodes
         .iter()
         .map(|node| {
@@ -334,7 +314,7 @@ fn gen_load_balance_config(nodes: &[&Node], local_port: u16) -> String {
         .collect::<Vec<_>>();
 
     let node = &nodes[0];
-    json!({
+    let val = json!({
         "log": {
             "loglevel": "debug"
         },
@@ -368,60 +348,12 @@ fn gen_load_balance_config(nodes: &[&Node], local_port: u16) -> String {
                 "network": "ws"
             }
         }
-    })
-    .to_string()
+    });
+    Ok(val.to_string())
 }
 
-fn gen_tcp_ping_config(node: &Node, local_port: u16) -> String {
-    json!({
-        "log": {
-            "loglevel": "debug"
-        },
-        "inbound": {
-            "settings": {
-                "timeout": 0,
-                "allowTransparent": false,
-                "userLevel": 0
-            },
-            "protocol": "http",
-            "port": local_port,
-            "sniffing": {
-                "enabled": true,
-                "destOverride": [
-                    "http",
-                    "tls"
-                ]
-            },
-            "listen": "127.0.0.1"
-        },
-        "outbound": {
-            "settings": {
-                "vnext": [
-                    {
-                        "address": node.add.as_ref().expect("not found address"),
-                        "port": node.port.as_ref().expect("not found port"),
-                        "users": [
-                            {
-                                "id": node.id.as_ref().expect("not found id"),
-                                "alterId": node.aid.as_ref().expect("not found alter_id")
-                            }
-                        ]
-                    }
-                ]
-            },
-            "protocol": "vmess",
-            "streamSettings": {
-                "wsSettings": {
-                    "path": node.path.as_ref().expect("not found path"),
-                    "headers": {
-                        "host": node.host.as_ref().expect("not found host")
-                    }
-                },
-                "network": "ws"
-            }
-        }
-    })
-    .to_string()
+fn gen_tcp_ping_config(node: &Node, local_port: u16) -> Result<String> {
+    gen_load_balance_config(&[node], local_port)
 }
 
 #[cfg(test)]
@@ -436,7 +368,7 @@ mod v2ray_tests {
     #[test]
     fn gen_config_nodes() -> Result<()> {
         let local_port = 1000;
-        let config = gen_load_balance_config(&[&get_node(), &get_node()], local_port);
+        let config = gen_load_balance_config(&[&get_node(), &get_node()], local_port)?;
         log::debug!("config: {}", config);
         let node = get_node();
         assert!(!config.is_empty());
@@ -457,79 +389,63 @@ mod v2ray_tests {
         Ok(())
     }
 
-    #[test]
-    fn start_test() {
-        async fn test() -> Result<()> {
-            let node = get_node();
-            let v2ray = get_v2ray();
-            let config = gen_tcp_ping_config(&node, v2ray.next_local_port().await);
-            v2ray.start(&config).await?;
-            Ok(())
-        }
-        smol::block_on(async {
-            test().await.unwrap();
-        });
+    // #[test]
+    #[tokio::test]
+    async fn start_test() -> Result<()> {
+        let node = get_node();
+        let v2ray = get_v2ray();
+        let config = gen_tcp_ping_config(&node, v2ray.next_local_port().await)?;
+        v2ray.start(&config).await?;
+        Ok(())
     }
 
-    #[test]
-    fn measure_duration_with_v2ray_start() {
-        async fn test() -> Result<()> {
-            let node = get_node();
-            let v2ray = get_v2ray();
-            let local_port = v2ray.next_local_port().await;
+    // #[test]
+    #[tokio::test]
+    async fn measure_duration_with_v2ray_start() -> Result<()> {
+        let node = get_node();
+        let v2ray = get_v2ray();
+        let local_port = v2ray.next_local_port().await;
 
-            let config = gen_tcp_ping_config(&node, local_port);
-            let mut child = v2ray.start(&config).await?;
+        let config = gen_tcp_ping_config(&node, local_port)?;
+        let mut child = v2ray.start(&config).await?;
 
-            futures::executor::block_on(async_compat::Compat::new(async {
-                measure_duration_with_proxy_run(&v2ray.ping_property.ping_url, local_port)
-                    .await
-                    .expect("get duration error");
-            }));
-            child.kill()?;
-            Ok(())
-        }
-        smol::block_on(async {
-            test().await.unwrap();
-        });
+        measure_duration_with_proxy(
+            &v2ray.ping_property.ping_url,
+            local_port,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("get duration error");
+        child.kill().await?;
+        Ok(())
     }
 
-    #[test]
-    fn tcp_ping_test() {
-        async fn test() -> Result<()> {
-            let node = get_node();
-            let v2ray = get_v2ray();
-            let stats = v2ray.tcp_ping(&node).await?;
-            assert_eq!(
-                stats.durations.len(),
-                PingProperty::default().count as usize
-            );
-            assert!(stats.durations.iter().filter(|d| d.is_some()).count() > 0);
-            Ok(())
-        }
-        smol::block_on(async {
-            test().await.unwrap();
-        });
+    #[tokio::test]
+    async fn tcp_ping_test() -> Result<()> {
+        let node = get_node();
+        let v2ray = get_v2ray();
+        let stats = v2ray.tcp_ping(&node).await?;
+        assert_eq!(
+            stats.durations.len(),
+            PingProperty::default().count as usize
+        );
+        assert!(stats.durations.iter().filter(|d| d.is_some()).count() > 0);
+        Ok(())
     }
 
-    #[test]
-    fn tcp_ping_error_when_node_unavailable() {
-        async fn test() -> Result<()> {
-            let mut node = get_node();
-            node.add = Some("test.host.addr".to_owned());
-            // node.host = Some("2423".to_owned());
-            let v2ray = get_v2ray();
-            let stats = v2ray.tcp_ping(&node).await?;
-            assert_eq!(
-                stats.durations.len(),
-                PingProperty::default().count as usize
-            );
-            assert_eq!(stats.durations.iter().filter(|d| d.is_some()).count(), 0);
-            Ok(())
-        }
-        smol::block_on(async {
-            test().await.unwrap();
-        });
+    #[tokio::test]
+    async fn tcp_ping_error_when_node_unavailable() -> Result<()> {
+        let mut node = get_node();
+        node.add = Some("test.host.addr".to_owned());
+        // node.host = Some("2423".to_owned());
+        let v2ray = get_v2ray();
+        let stats = v2ray.tcp_ping(&node).await?;
+        assert_eq!(
+            stats.durations.len(),
+            PingProperty::default().count as usize
+        );
+        assert_eq!(stats.durations.iter().filter(|d| d.is_some()).count(), 0);
+        Ok(())
     }
 
     static INIT: Once = Once::new();
