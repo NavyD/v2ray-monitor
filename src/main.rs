@@ -1,7 +1,3 @@
-use std::time::{Duration, Instant};
-
-use async_tls::TlsConnector;
-use smol::net::TcpStream;
 // use surf::{Client, Request, Response, http::headers::FORWARDED, middleware::{Middleware, Next}};
 use v2ray::{PingProperty, V2ray, V2rayProperty};
 
@@ -27,7 +23,7 @@ async fn run() -> anyhow::Result<()> {
     let vp = V2rayProperty::default();
     let (tx, rx) = smol::channel::bounded(1);
     let v2ray = V2ray::new(pp, vp);
-    let count = nodes.len() / 2;
+    let count = nodes.len();
 
     for _ in 0..count {
         let node = nodes.pop().unwrap();

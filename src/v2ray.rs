@@ -1,7 +1,7 @@
 use std::{
-    borrow::{Borrow, BorrowMut},
+    borrow::{Borrow},
     env::{split_paths, var_os},
-    ops::{Deref, DerefMut, Range},
+    ops::{Deref, Range},
     process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
@@ -9,7 +9,6 @@ use std::{
 
 use anyhow::Result;
 use async_tls::TlsConnector;
-use futures::Future;
 
 use crate::node::Node;
 
@@ -198,7 +197,7 @@ impl V2rayRef {
         let url = &self.ping_property.ping_url;
         let mut durations: Vec<Option<Duration>> = vec![None; count as usize];
 
-        let (tx, mut rx) = smol::channel::bounded(1);
+        let (tx, rx) = smol::channel::bounded(1);
         for i in 0..count {
             let url = url.clone();
             let tx = tx.clone();
@@ -221,12 +220,6 @@ impl V2rayRef {
             log::debug!("received task: ({}, {:?})", i, du);
             durations[i as usize] = du;
         }
-
-        log::debug!(
-            "tcp ping node: {:?} has durations: {:?}",
-            node.remark,
-            durations
-        );
         Ok(TcpPingStatistic::new(durations))
     }
 
@@ -242,7 +235,7 @@ impl V2rayRef {
 
 use async_h1::client;
 use http_types::Version;
-use http_types::{Error, Method, Request, Url};
+use http_types::{Method, Request, Url};
 
 async fn measure_duration_with_proxy_run(url: &str, proxy_port: u16) -> anyhow::Result<Duration> {
     log::debug!(
