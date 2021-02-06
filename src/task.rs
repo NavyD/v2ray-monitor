@@ -1,18 +1,16 @@
 use std::{
-    collections::HashMap,
-    convert::TryInto,
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 use crate::{
     node::{load_subscription_nodes_from_file, Node},
     v2ray::*,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use atime::sleep;
 use futures::Future;
-use log::warn;
+
 use once_cell::sync::Lazy;
 use regex::Regex;
 use tokio::{
@@ -46,12 +44,13 @@ pub struct SubscriptionProperty {
 
 impl Default for SubscriptionProperty {
     fn default() -> Self {
-        let cur_dir = std::env::current_dir()
+        let cur_subspt_path = std::env::current_dir()
+            .map(|d| d.join("v2ray-subscription.txt"))
             .ok()
             .and_then(|d| d.to_str().map(|s| s.to_owned()))
             .unwrap();
         Self {
-            path: cur_dir,
+            path: cur_subspt_path,
             update_interval: Duration::from_secs(60 * 60 * 12),
             url: "https://www.jinkela.site/link/ukWr5K49YjHIQGdL?sub=3".to_owned(),
         }
@@ -127,6 +126,7 @@ impl V2rayTask {
         self.auto_update_subscription().await?;
         self.auto_swith().await
     }
+
     /// 根据订阅文件自动更新并加载到内存中。
     ///
     async fn auto_update_subscription(&mut self) -> Result<()> {
@@ -184,12 +184,15 @@ impl V2rayTask {
             rtt_max: None,
             rtt_min: None,
         };
+
+        let path = &self.subspt_property.path;
+        log::debug!("loading nodes from path: {}", path);
         let name_regex = if let Some(r) = &self.fp.node_name_regex {
             Some(Regex::new(r)?)
         } else {
             None
         };
-        let path = &self.subspt_property.path;
+
         let nodes = load_subscription_nodes_from_file(path)
             .await?
             .into_iter()
@@ -373,26 +376,29 @@ where
     retry_count
 }
 
-// async fn retry_on_fail<F, Fut>(func: F, next_itv_func: impl Fn(Duration, usize) -> Duration)
-// where
-//     F: Fn() -> Fut,
-//     Fut: Future<Output = Result<()>>,
-// {
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-// async fn retry_on_success<F, Fut>(func: F, next_itv_func: impl Fn(Duration, usize) -> Duration)
-// where
-//     F: Fn() -> Fut,
-//     Fut: Future<Output = Result<()>>,
-// {
-//     let mut retry_count = 0;
-//     let mut last_itv = Duration::from_nanos(0);
-//     let start = Instant::now();
-//     while func().await.is_ok() {
-//         retry_count += 1;
-//         last_itv = next_itv_func(last_itv, retry_count);
-//         sleep(last_itv).await;
-//     }
-//     let d = Instant::now() - start;
-//     log::debug!("eixt after {} retries, it takes {:?}", retry_count, d);
-// }
+    #[tokio::test]
+    async fn load_nodes_test() -> Result<()> {
+        let mut task = V2rayTask::with_default();
+        task.load_nodes().await?;
+        let stats = task.node_stats.lock().await;
+        assert!(!stats.is_empty());
+        assert_eq!(stats.len(), 147);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_nodes_name_filter() -> Result<()> {
+        let mut task = V2rayTask::with_default();
+        task.fp = Arc::new(FilterProperty {
+            node_name_regex: Some("安徽→香港01".to_owned()),
+        });
+        task.load_nodes().await?;
+        let stats = task.node_stats.lock().await;
+        assert_eq!(stats.len(), 1);
+        Ok(())
+    }
+}

@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 /// 应用nodes生成v2ray配置
-/// 
+///
 /// 如果指定则使用local_port，否则依赖contents中的配置
 ///
 /// # Errors

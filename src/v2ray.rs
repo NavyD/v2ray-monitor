@@ -1,9 +1,6 @@
 use std::{
-    borrow::Borrow,
     cmp::Ordering,
-    collections::{HashMap, HashSet},
     env::{split_paths, var_os},
-    ops::{Deref, Range},
     process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
@@ -19,7 +16,7 @@ use tokio::{
     io::*,
     net::TcpListener,
     process::{Child, Command},
-    sync::{mpsc::channel, Barrier, Mutex, Semaphore},
+    sync::{mpsc::channel, Semaphore},
 };
 
 use serde::{Deserialize, Serialize};
