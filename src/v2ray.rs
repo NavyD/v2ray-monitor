@@ -1,5 +1,6 @@
 use std::{
     borrow::Borrow,
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     env::{split_paths, var_os},
     ops::{Deref, Range},
@@ -8,11 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::node::{load_subscription_nodes_from_file, Node};
-use crate::config::{*};
-use anyhow::{anyhow, Result};
-use futures::Future;
-use rand::{prelude::ThreadRng, Rng};
+use crate::config::*;
+use crate::node::Node;
+use anyhow::Result;
+
 use reqwest::Proxy;
 use tokio::{
     fs::read_to_string,
@@ -23,7 +23,6 @@ use tokio::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 pub struct V2rayProperty {
     pub bin_path: String,
@@ -84,7 +83,7 @@ impl Default for PingProperty {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq)]
 pub struct TcpPingStatistic {
     pub durations: Vec<Option<Duration>>,
     pub count: usize,
@@ -92,6 +91,39 @@ pub struct TcpPingStatistic {
     pub rtt_min: Option<Duration>,
     pub rtt_max: Option<Duration>,
     pub rtt_avg: Option<Duration>,
+}
+
+impl PartialEq for TcpPingStatistic {
+    fn eq(&self, other: &Self) -> bool {
+        self.rtt_avg == other.rtt_avg
+            && self.rtt_min == other.rtt_min
+            && self.rtt_max == other.rtt_max
+    }
+}
+
+impl Ord for TcpPingStatistic {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let compare = |a: Option<Duration>, b: Option<Duration>| match (a, b) {
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (a, b) => a.cmp(&b),
+        };
+        let v = compare(self.rtt_avg, other.rtt_avg);
+        if v != Ordering::Equal {
+            return v;
+        }
+        let v = compare(self.rtt_min, other.rtt_min);
+        if v != Ordering::Equal {
+            return v;
+        }
+        compare(self.rtt_max, other.rtt_max)
+    }
+}
+
+impl PartialOrd for TcpPingStatistic {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(&other))
+    }
 }
 
 impl TcpPingStatistic {
@@ -130,14 +162,54 @@ impl TcpPingStatistic {
             rtt_min,
         }
     }
+
+    pub fn is_accessible(&self) -> bool {
+        self.received_count > 0
+    }
 }
 
-pub async fn start_load_balance(vp: &V2rayProperty, nodes: &[Node]) -> Result<Child> {
-    let config = if let Some(path) = &vp.config_path {
- 
-        todo!("unsupported config path")
+pub async fn restart_load_balance(
+    vp: &V2rayProperty,
+    nodes: &[&Node],
+    v2_child: Option<Child>,
+) -> Result<Child> {
+    if let Some(mut child) = v2_child {
+        log::debug!("killing old v2ray proccess: {:?}", child.id());
+        child.kill().await?;
     } else {
-        gen_load_balance_config(&nodes.iter().collect::<Vec<_>>(),vp.port)?
+        log::debug!("killing all v2ray proccess");
+        killall_v2ray().await?;
+    }
+    start_load_balance(vp, nodes).await
+}
+
+pub async fn killall_v2ray() -> Result<()> {
+    let out = Command::new("killall")
+        .arg("-9")
+        .arg("v2ray")
+        .output()
+        .await?;
+    if out.status.success() {
+        log::debug!(
+            "killall v2ray success: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    } else {
+        log::debug!(
+            "killall v2ray failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// 使用负载均衡配置启动v2ray。如果`V2rayProperty::config_path`为空则使用默认的配置
+pub async fn start_load_balance(vp: &V2rayProperty, nodes: &[&Node]) -> Result<Child> {
+    let config = if let Some(path) = &vp.config_path {
+        let contents = read_to_string(path).await?;
+        apply_config(&contents, nodes, None)?
+    } else {
+        gen_load_balance_config(nodes, vp.port)?
     };
     start(&vp.bin_path, &config).await
 }
@@ -332,7 +404,6 @@ mod v2ray_tests {
 
     use super::*;
     use log::LevelFilter;
-    use serde_json::Value;
 
     #[tokio::test]
     async fn start_test() -> Result<()> {

@@ -3,6 +3,8 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 /// 应用nodes生成v2ray配置
+/// 
+/// 如果指定则使用local_port，否则依赖contents中的配置
 ///
 /// # Errors
 ///
@@ -15,11 +17,22 @@ pub fn apply_config(contents: &str, nodes: &[&Node], local_port: Option<u16>) ->
 
     check_load_balance_nodes(nodes)?;
 
-    apply(
-        &mut contents,
-        "outbound.settings.vnext",
-        json!(gen_next_items(nodes)),
-    )?;
+    let vnext = nodes
+        .iter()
+        .map(|node| {
+            json!({
+                "address": node.add.as_ref().expect("not found address"),
+                "port": node.port.as_ref().expect("not found port"),
+                "users": [
+                    {
+                        "id": node.id.as_ref().expect("not found id"),
+                        "alterId": node.aid.as_ref().expect("not found alter_id")
+                    }
+                ]
+            })
+        })
+        .collect::<Vec<_>>();
+    apply(&mut contents, "outbound.settings.vnext", json!(vnext))?;
 
     let node = nodes[0];
     apply(
@@ -75,32 +88,7 @@ fn check_load_balance_nodes(nodes: &[&Node]) -> Result<()> {
     Ok(())
 }
 
-fn gen_next_items(nodes: &[&Node]) -> Vec<Value> {
-    nodes
-        .iter()
-        .map(|node| {
-            json!({
-                "address": node.add.as_ref().expect("not found address"),
-                "port": node.port.as_ref().expect("not found port"),
-                "users": [
-                    {
-                        "id": node.id.as_ref().expect("not found id"),
-                        "alterId": node.aid.as_ref().expect("not found alter_id")
-                    }
-                ]
-            })
-        })
-        .collect::<Vec<_>>()
-}
-
 /// 应用nodes生成v2ray负载均衡配置
-///
-/// # panic
-///
-/// * 如果nodes为空
-/// * node.host不一致时
-/// * node.net不是`ws`类型时
-/// * node关键字段中存在None
 pub fn gen_load_balance_config(nodes: &[&Node], local_port: u16) -> Result<String> {
     let contents = r#"{
         "log": {
