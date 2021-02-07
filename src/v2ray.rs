@@ -21,6 +21,7 @@ use tokio::{
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug)]
 pub struct V2rayProperty {
     pub bin_path: String,
     pub config_path: Option<String>,
@@ -475,7 +476,7 @@ mod v2ray_tests {
         INIT.call_once(|| {
             env_logger::builder()
                 .is_test(true)
-                .filter_level(LevelFilter::Trace)
+                .filter_level(LevelFilter::Debug)
                 .init();
         });
     }
