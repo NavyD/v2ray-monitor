@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use task::V2rayTask;
+use tokio::time::sleep;
 
 mod config;
 mod node;
@@ -9,8 +12,12 @@ mod v2ray;
 async fn main() -> anyhow::Result<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Debug)
+        .filter_module("reqwest", log::LevelFilter::Info)
         .init();
-    V2rayTask::with_default().run().await?;
-
-    Ok(())
+    let mut v2 = V2rayTask::with_default();
+    v2.filter_property.node_name_regex = Some("→香港02".to_owned());
+    v2.run().await?;
+    loop {
+        sleep(Duration::from_secs(30)).await;
+    }
 }

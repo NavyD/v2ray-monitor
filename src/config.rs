@@ -49,17 +49,23 @@ pub fn apply_config(contents: &str, nodes: &[&Node], local_port: Option<u16>) ->
 
     if let Some(port) = local_port {
         apply(&mut contents, "inbound.port", json!(port))?;
+    } else {
+        let port = get_mut(&mut contents, "inbound.port")?;
+        log::debug!("use old inbound.port: {}", port);
     }
 
     Ok(contents.to_string())
 }
 
+fn get_mut<'a>(contents: &'a mut Value, path: &str) -> Result<&'a mut Value> {
+    path.split('.')
+        .fold(Some(contents), |val, key| val.and_then(|v| v.get_mut(key)))
+        .ok_or_else(|| anyhow!("read config error: {}", path))
+}
+
 /// 使用path .分离出key找出对应的value并重置为new_val
 fn apply(contents: &mut Value, path: &str, new_val: Value) -> Result<()> {
-    let old = path
-        .split('.')
-        .fold(Some(contents), |val, key| val.and_then(|v| v.get_mut(key)))
-        .ok_or_else(|| anyhow!("read config error: {}", path))?;
+    let old = get_mut(contents, path)?;
     log::trace!("old {}: {:?}", path, old);
     *old = new_val;
     log::trace!("applied {}: {:?}", path, old);

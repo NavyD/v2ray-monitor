@@ -26,7 +26,7 @@ pub struct V2rayProperty {
     pub bin_path: String,
     pub config_path: Option<String>,
     pub concurr_num: usize,
-    pub port: u16,
+    pub port: Option<u16>,
 }
 
 impl Default for V2rayProperty {
@@ -59,7 +59,7 @@ impl Default for V2rayProperty {
             bin_path,
             config_path: None,
             concurr_num: num_cpus::get(),
-            port: 1080,
+            port: Some(1080),
         }
     }
 }
@@ -81,7 +81,7 @@ impl Default for PingProperty {
     }
 }
 
-#[derive(Debug, Eq)]
+#[derive(Debug, Eq, Clone)]
 pub struct TcpPingStatistic {
     pub durations: Vec<Option<Duration>>,
     pub count: usize,
@@ -207,7 +207,10 @@ pub async fn start_load_balance(vp: &V2rayProperty, nodes: &[&Node]) -> Result<C
         let contents = read_to_string(path).await?;
         apply_config(&contents, nodes, None)?
     } else {
-        gen_load_balance_config(nodes, vp.port)?
+        gen_load_balance_config(
+            nodes,
+            vp.port.expect("not found port in gen_load_balance_config"),
+        )?
     };
     start(&vp.bin_path, &config).await
 }
@@ -477,6 +480,7 @@ mod v2ray_tests {
             env_logger::builder()
                 .is_test(true)
                 .filter_level(LevelFilter::Debug)
+                .filter_module("reqwest", LevelFilter::Debug)
                 .init();
         });
     }

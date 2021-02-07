@@ -14,19 +14,17 @@ use futures::Future;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use reqwest::Proxy;
 use tokio::{
     fs::{write, File},
     process::Child,
     sync::Mutex,
     time::{self as atime},
 };
-trait NodeFilter {
-    fn filter(nodes: Vec<Node>) -> Vec<Node>;
-}
 
 #[derive(Debug, Clone)]
-struct FilterProperty {
-    node_name_regex: Option<String>,
+pub struct FilterProperty {
+    pub node_name_regex: Option<String>,
 }
 
 impl Default for FilterProperty {
@@ -66,14 +64,14 @@ impl Default for SubscriptionProperty {
     }
 }
 
-struct PingTaskProperty {
+struct AutoTcpPingProperty {
     ping_interval: Duration,
     max_retries_failed: usize,
     min_retry_interval: Duration,
     max_retry_interval: Duration,
 }
 
-impl Default for PingTaskProperty {
+impl Default for AutoTcpPingProperty {
     fn default() -> Self {
         Self {
             ping_interval: Duration::from_secs(60 * 10),
@@ -84,12 +82,12 @@ impl Default for PingTaskProperty {
     }
 }
 
+#[derive(Debug, Clone)]
 struct SwitchProperty {
     check_url: String,
     check_timeout: Duration,
-    interval: Duration,
 
-    nodes_size: u8,
+    lb_nodes_size: u8,
 
     max_retries_failed: usize,
     max_retry_interval: Duration,
@@ -101,10 +99,9 @@ impl Default for SwitchProperty {
         Self {
             check_url: "https://www.google.com/gen_204".to_owned(),
             check_timeout: Duration::from_secs(3),
-            interval: Duration::from_secs(2),
-            nodes_size: 3,
-            max_retries_failed: 6,
-            max_retry_interval: Duration::from_secs(10),
+            lb_nodes_size: 3,
+            max_retries_failed: 3,
+            max_retry_interval: Duration::from_secs(30),
             min_retry_interval: Duration::from_secs(1),
         }
     }
@@ -114,24 +111,24 @@ static V2_CHILD: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
 
 pub struct V2rayTask {
     node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
-    ptp: PingTaskProperty,
-    subspt_property: SubscriptionProperty,
+    tcp_ping_property: AutoTcpPingProperty,
+    subscpt_property: SubscriptionProperty,
     switch_property: SwitchProperty,
-    vp: V2rayProperty,
-    pp: PingProperty,
-    fp: FilterProperty,
+    v2_property: V2rayProperty,
+    ping_property: PingProperty,
+    pub filter_property: FilterProperty,
 }
 
 impl V2rayTask {
     pub fn with_default() -> Self {
         Self {
             node_stats: Arc::new(Mutex::new(vec![])),
-            ptp: PingTaskProperty::default(),
-            subspt_property: SubscriptionProperty::default(),
+            tcp_ping_property: AutoTcpPingProperty::default(),
+            subscpt_property: SubscriptionProperty::default(),
             switch_property: SwitchProperty::default(),
-            vp: V2rayProperty::default(),
-            pp: PingProperty::default(),
-            fp: FilterProperty::default(),
+            v2_property: V2rayProperty::default(),
+            ping_property: PingProperty::default(),
+            filter_property: FilterProperty::default(),
         }
     }
 
@@ -139,19 +136,20 @@ impl V2rayTask {
         self.load_nodes().await?;
         self.auto_ping();
         self.auto_update_subscription().await?;
-        self.auto_swith().await
+        self.auto_swith().await;
+        Ok(())
     }
 
     /// 根据订阅文件自动更新并加载到内存中。
     ///
     async fn auto_update_subscription(&mut self) -> Result<()> {
-        let url = self.subspt_property.url.clone();
-        let path = self.subspt_property.path.clone();
-        let interval = self.subspt_property.update_interval;
-        let max_retries_failed = self.subspt_property.max_retries_failed;
+        let url = self.subscpt_property.url.clone();
+        let path = self.subscpt_property.path.clone();
+        let interval = self.subscpt_property.update_interval;
+        let max_retries_failed = self.subscpt_property.max_retries_failed;
         let (min_itv, max_itv) = (
-            self.subspt_property.min_retry_interval,
-            self.subspt_property.max_retry_interval,
+            self.subscpt_property.min_retry_interval,
+            self.subscpt_property.max_retry_interval,
         );
 
         let first_interval = {
@@ -203,9 +201,9 @@ impl V2rayTask {
             rtt_min: None,
         };
 
-        let path = &self.subspt_property.path;
+        let path = &self.subscpt_property.path;
         log::debug!("loading nodes from path: {}", path);
-        let name_regex = if let Some(r) = &self.fp.node_name_regex {
+        let name_regex = if let Some(r) = &self.filter_property.node_name_regex {
             Some(Regex::new(r)?)
         } else {
             None
@@ -228,86 +226,66 @@ impl V2rayTask {
         Ok(())
     }
 
-    async fn auto_swith(&mut self) -> Result<()> {
-        // 0. check networking status
-        async fn check(url: &str, timeout: Duration) -> Result<()> {
-            let client = reqwest::Client::builder().timeout(timeout).build()?;
-            let status = client.get(url).send().await?.status();
-            if !status.is_success() {
-                log::info!("switch checking got exception status: {}", status);
-            }
-            Ok(())
-        }
-
+    async fn auto_swith(&mut self) {
+        let check_url = self.switch_property.check_url.clone();
         let timeout = self.switch_property.check_timeout;
-        let max_retries = self.switch_property.max_retries_failed;
+        let max_retries_failed = self.switch_property.max_retries_failed;
         let (min_itv, max_itv) = (
             self.switch_property.min_retry_interval,
             self.switch_property.max_retry_interval,
         );
-        let selected_size = self.switch_property.nodes_size as usize;
-        let next = move |last: Duration, retries: usize| {
-            if retries == 0 {
-                min_itv
-            } else if last > max_itv {
-                max_itv
-            } else {
-                last + last
-            }
-        };
-        let last_checked = Arc::new(Mutex::new(false));
+        let selected_size = self.switch_property.lb_nodes_size as usize;
+        let node_stats = self.node_stats.clone();
+        let vp = self.v2_property.clone();
 
-        let mut interval = atime::interval(self.switch_property.interval);
-        loop {
-            interval.tick().await;
+        let proxy: Option<String> = self
+            .v2_property
+            .port
+            .as_ref()
+            .map(|p| "socks5://127.0.0.1:".to_string() + &p.to_string());
 
-            {
-                if let Err(e) = last_checked.try_lock() {
-                    log::debug!("auto switch is running: {}", e);
-                    continue;
-                }
-            }
+        tokio::spawn(async move {
+            let check_url = check_url.to_owned();
+            let task =
+                Arc::new(move || check_networking_owned(check_url.clone(), timeout, proxy.clone()));
 
-            let url = self.switch_property.check_url.clone();
-            let vp = self.vp.clone();
-            let last_checked = last_checked.clone();
-            let nodes = self.node_stats.lock().await;
-            let nodes = nodes
-                .iter()
-                .filter(|(_, ps)| ps.is_accessible())
-                .map(|(node, _)| node.clone())
-                .collect::<Vec<_>>();
-            if nodes.is_empty() {
-                log::info!("not found any available nodes. please update ping statistics");
-                continue;
-            }
-            tokio::spawn(async move {
-                let mut last_checked = last_checked.lock().await;
-                let max_retries = if *last_checked {
-                    std::usize::MAX
-                } else {
-                    max_retries
-                };
-                // 1. 假设开始失败 时继续到最大间隔重试
-                match retry_on(|| check(&url, timeout), next, max_retries, *last_checked).await {
+            let mut last_checked = false;
+            let mut max_retries = max_retries_failed;
+
+            loop {
+                log::debug!("retrying check networking");
+                match retry_on_owned(
+                    task.clone(),
+                    next_beb_interval(min_itv, max_itv),
+                    max_retries,
+                    last_checked,
+                )
+                .await
+                {
                     Ok(retries) => {
-                        log::debug!("retries: {}", retries);
+                        if retries <= max_retries && !last_checked {
+                            max_retries = std::usize::MAX;
+                        }
+                        // 上次是失败时 这次是做失败时重试 后成功退出
+                        if !last_checked {
+                            log::debug!("found networking problem on success retries: {}", retries);
+                        }
+                        // 这次做成功时重试 后失败退出
+                        else {
+                            max_retries = max_retries_failed;
+                            log::debug!("recovery networking on failed retries: {}", retries);
+                        }
                     }
+                    // 重试次数达到max_retries
                     Err(e) => {
-                        if !*last_checked {
-                            log::info!("check multiple failures and start automatic switching");
-                            // switch on failed again
-                            let nodes = &nodes.iter().collect::<Vec<_>>()[..selected_size];
-                            let child = V2_CHILD.lock().await.take();
-                            match restart_load_balance(&vp, nodes, child).await {
-                                // 保留v2ray进程
-                                Ok(child) => {
-                                    V2_CHILD.lock().await.replace(child);
-                                }
-                                Err(e) => {
-                                    log::warn!("switch v2ray error: {}", e);
-                                }
+                        if !last_checked {
+                            log::debug!("switching nodes");
+                            if let Err(e) =
+                                switch_v2ray(node_stats.clone(), selected_size, &vp).await
+                            {
+                                log::warn!("switch v2ray failed: {}", e);
                             }
+                            continue;
                         } else {
                             log::debug!(
                                 "Check that a failure has occurred: {}, try again if it fails",
@@ -316,20 +294,22 @@ impl V2rayTask {
                         }
                     }
                 }
-
-                *last_checked = !*last_checked;
-            });
-        }
+                last_checked = !last_checked;
+            }
+        });
     }
 
     /// 成功ping时使用默认的interval，如果失败则使用`PingTaskProperty::max_retry_interval`不断重试
     fn auto_ping(&mut self) {
-        let ping_interval = self.ptp.ping_interval;
-        let vp = Arc::new(self.vp.clone());
-        let pp = Arc::new(self.pp.clone());
+        let ping_interval = self.tcp_ping_property.ping_interval;
+        let vp = Arc::new(self.v2_property.clone());
+        let pp = Arc::new(self.ping_property.clone());
         let stats_lock = self.node_stats.clone();
-        let max_retries = self.ptp.max_retries_failed;
-        let (min_itv, max_itv) = (self.ptp.min_retry_interval, self.ptp.max_retry_interval);
+        let max_retries = self.tcp_ping_property.max_retries_failed;
+        let (min_itv, max_itv) = (
+            self.tcp_ping_property.min_retry_interval,
+            self.tcp_ping_property.max_retry_interval,
+        );
 
         tokio::spawn(async move {
             loop_with_interval(
@@ -337,7 +317,9 @@ impl V2rayTask {
                     let vp = vp.clone();
                     let pp = pp.clone();
                     let stats_lock = stats_lock.clone();
-                    let task = move || update_tcp_ping_stats_owned(stats_lock.clone(), vp.clone(), pp.clone());
+                    let task = move || {
+                        update_tcp_ping_stats_owned(stats_lock.clone(), vp.clone(), pp.clone())
+                    };
                     retry_on(
                         task,
                         next_beb_interval(min_itv, max_itv),
@@ -353,14 +335,57 @@ impl V2rayTask {
     }
 }
 
+async fn switch_v2ray(
+    node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
+    selected_size: usize,
+    vp: &V2rayProperty,
+) -> Result<()> {
+    if node_stats
+        .lock()
+        .await
+        .iter()
+        .all(|(_, ps)| !ps.is_accessible())
+    {
+        log::error!("not found any available nodes. please update ping statistics");
+        return Err(anyhow!(
+            "not found any available nodes. please update ping statistics"
+        ));
+    }
+
+    // switch on failed again
+    let nodes = {
+        let nodes = node_stats.lock().await;
+        let nodes = if nodes.len() < selected_size {
+            &nodes
+        } else {
+            &nodes[..selected_size]
+        };
+        nodes.iter().map(|v| (v.0.clone(), v.1.clone())).collect::<Vec<_>>()
+    };
+
+    if log::log_enabled!(log::Level::Info) {
+        let nodes = nodes
+            .iter()
+            .map(|(n, ps)| (n.remark.as_deref(), ps))
+            .collect::<Vec<_>>();
+        log::info!("switching with selected nodes: {:?}", nodes);
+    }
+
+    let nodes = nodes.iter().map(|v| &v.0).collect::<Vec<_>>();
+    let child = restart_load_balance(&vp, &nodes, V2_CHILD.lock().await.take()).await?;
+    V2_CHILD.lock().await.replace(child);
+    Ok(())
+}
+
 fn next_beb_interval(min_itv: Duration, max_itv: Duration) -> impl Fn(Duration, usize) -> Duration {
     move |last, _retries| {
-        if last < min_itv {
+        let next = last + last;
+        if next < min_itv {
             min_itv
-        } else if last > max_itv {
+        } else if next > max_itv {
             max_itv
         } else {
-            last + last
+            next
         }
     }
 }
@@ -383,7 +408,11 @@ where
                 interval
             }
             Err(e) => {
-                log::warn!("use max retry interval {:?} for loop failed: {}", max_retry_interval, e);
+                log::warn!(
+                    "use max retry interval {:?} for loop failed: {}",
+                    max_retry_interval,
+                    e
+                );
                 max_retry_interval
             }
         };
@@ -392,9 +421,34 @@ where
     }
 }
 
+async fn check_networking_owned(
+    url: String,
+    timeout: Duration,
+    proxy_url: Option<String>,
+) -> Result<()> {
+    check_networking(&url, timeout, proxy_url.as_deref()).await
+}
+
+async fn check_networking(url: &str, timeout: Duration, proxy_url: Option<&str>) -> Result<()> {
+    let mut client = reqwest::Client::builder();
+    if let Some(proxy) = proxy_url {
+        client = client.proxy(Proxy::all(proxy)?);
+    }
+    let client = client.timeout(timeout).build()?;
+    let status = client.get(url).send().await?.status();
+    if !status.is_success() {
+        log::info!("switch checking got exception status: {}", status);
+    }
+    Ok(())
+}
+
 async fn update_subscription(url: &str, path: &str) -> Result<()> {
     let contents = reqwest::get(url).await?.bytes().await?;
-    log::debug!("writing to {} for subscription contents len: {}", path, contents.len());
+    log::debug!(
+        "writing to {} for subscription contents len: {}",
+        path,
+        contents.len()
+    );
     write(path, contents).await?;
     Ok(())
 }
@@ -494,6 +548,7 @@ where
     let mut retry_count = 0;
     let start = Instant::now();
     while retried(func().await) {
+        retry_count += 1;
         if retry_count == std::usize::MAX {
             panic!("overflow usize retry_count");
         }
@@ -504,9 +559,13 @@ where
                 max_retries
             ));
         }
-        retry_count += 1;
         last_itv = next_itv_func(last_itv, retry_count);
-        log::debug!("sleeping {:?} on retries: {}", last_itv, retry_count);
+        log::debug!(
+            "sleeping {:?} on retries: {}, max retries: {}",
+            last_itv,
+            retry_count,
+            max_retries
+        );
         sleep(last_itv).await;
     }
     let d = Instant::now() - start;
@@ -536,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn load_nodes_name_filter() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.fp = FilterProperty {
+        task.filter_property = FilterProperty {
             node_name_regex: Some("安徽→香港01".to_owned()),
         };
         task.load_nodes().await?;
@@ -548,13 +607,18 @@ mod tests {
     #[tokio::test]
     async fn ping_task_test() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.fp = FilterProperty {
+        task.filter_property = FilterProperty {
             node_name_regex: Some("安徽→香港01".to_owned()),
         };
         task.load_nodes().await?;
         assert_eq!(task.node_stats.lock().await.len(), 1);
 
-        update_tcp_ping_stats(task.node_stats.clone(), &task.vp, &task.pp).await?;
+        update_tcp_ping_stats(
+            task.node_stats.clone(),
+            &task.v2_property,
+            &task.ping_property,
+        )
+        .await?;
 
         assert!(task
             .node_stats
@@ -568,7 +632,7 @@ mod tests {
     #[tokio::test]
     async fn ping_task_error_when_unavailable_address() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.fp = FilterProperty {
+        task.filter_property = FilterProperty {
             node_name_regex: Some("安徽→香港01".to_owned()),
         };
         task.load_nodes().await?;
@@ -579,33 +643,93 @@ mod tests {
             nodes[0].0.add = Some("non.host.address".to_owned());
         }
 
-        let res = update_tcp_ping_stats(task.node_stats.clone(), &task.vp, &task.pp).await;
+        let res = update_tcp_ping_stats(
+            task.node_stats.clone(),
+            &task.v2_property,
+            &task.ping_property,
+        )
+        .await;
         assert!(res.is_err());
         Ok(())
     }
 
     #[tokio::test]
     async fn update_subscription_test() -> Result<()> {
-        let subscpt = SubscriptionProperty::default();
-        let start =  Instant::now();
+        let mut subscpt = SubscriptionProperty::default();
+        let start = Instant::now();
+        subscpt.path = "/tmp/v2ray-subscription.txt".to_owned();
         update_subscription(&subscpt.url, &subscpt.path).await?;
-        let modified_time = File::open(subscpt.path).await?.metadata().await?.modified()?;
+        let modified_time = File::open(subscpt.path)
+            .await?
+            .metadata()
+            .await?
+            .modified()?;
         let elapsed = modified_time.elapsed()?;
         log::debug!("modified time: {:?}, elapsed: {:?}", modified_time, elapsed);
-        assert!(elapsed < Instant::now() - start );
+        assert!(elapsed < Instant::now() - start);
         Ok(())
     }
 
     #[tokio::test]
-    async fn auto_update_subscription() -> Result<()> {
+    async fn switch_v2ray_test() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.subspt_property.update_interval = Duration::from_secs(3);
-        // mock failure
-        // task.subspt_property.url = "test.a.b".to_owned();
-        task.auto_update_subscription().await?;
-        sleep(Duration::from_secs(10)).await;
+        task.filter_property = FilterProperty {
+            // node_name_regex: Some("安徽→香港01".to_owned()),
+            node_name_regex: Some("香港01".to_owned()),
+        };
+        let sp = task.switch_property.clone();
+        // task.vp;
+        task.load_nodes().await?;
+
+        update_tcp_ping_stats(
+            task.node_stats.clone(),
+            &task.v2_property,
+            &task.ping_property,
+        )
+        .await?;
+
+        switch_v2ray(task.node_stats, 3, &task.v2_property).await?;
+        check_networking(
+            &sp.check_url,
+            sp.check_timeout,
+            Some(&("socks5://127.0.0.1:".to_owned() + &task.v2_property.port.unwrap().to_string())),
+        )
+        .await?;
         Ok(())
     }
+
+    
+    // #[tokio::test]
+    // async fn auto_update_subscription() -> Result<()> {
+    //     let mut task = V2rayTask::with_default();
+    //     task.subscpt_property.update_interval = Duration::from_secs(3);
+    //     // mock failure
+    //     // task.subspt_property.url = "test.a.b".to_owned();
+    //     task.auto_update_subscription().await?;
+    //     sleep(Duration::from_secs(10)).await;
+    //     Ok(())
+    // }
+
+    // #[tokio::test]
+    // async fn auto_swith_test() -> Result<()> {
+    //     let mut task = V2rayTask::with_default();
+    //     task.filter_property = FilterProperty {
+    //         node_name_regex: Some("安徽→香港01".to_owned()),
+    //         // node_name_regex: Some("香港01".to_owned()),
+    //     };
+    //     task.load_nodes().await?;
+
+    //     update_tcp_ping_stats(
+    //         task.node_stats.clone(),
+    //         &task.v2_property,
+    //         &task.ping_property,
+    //     )
+    //     .await?;
+
+    //     task.auto_swith().await;
+    //     sleep(Duration::from_secs(150)).await;
+    //     Ok(())
+    // }
 
     // #[tokio::test]
     // async fn auto_ping_task_test() -> Result<()> {
