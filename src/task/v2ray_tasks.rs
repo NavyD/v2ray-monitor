@@ -1,5 +1,6 @@
 use std::{
     fmt::{Debug, Display},
+    io::BufReader,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,20 +10,21 @@ use crate::{
     v2ray::*,
 };
 use anyhow::{anyhow, Result};
-use atime::sleep;
 use futures::Future;
 
+use super::*;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::Proxy;
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{write, File},
     process::Child,
     sync::Mutex,
-    time::{self as atime},
+    time::sleep,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FilterProperty {
     pub node_name_regex: Option<String>,
 }
@@ -34,7 +36,7 @@ impl Default for FilterProperty {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SubscriptionProperty {
     path: String,
     update_interval: Duration,
@@ -64,6 +66,7 @@ impl Default for SubscriptionProperty {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct AutoTcpPingProperty {
     ping_interval: Duration,
     max_retries_failed: usize,
@@ -82,7 +85,7 @@ impl Default for AutoTcpPingProperty {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct SwitchProperty {
     check_url: String,
     check_timeout: Duration,
@@ -109,26 +112,43 @@ impl Default for SwitchProperty {
 
 static V2_CHILD: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct V2rayTaskProperty {
+    auto_ping: AutoTcpPingProperty,
+    subscpt: SubscriptionProperty,
+    switch: SwitchProperty,
+
+    v2: V2rayProperty,
+    ping: PingProperty,
+    filter: FilterProperty,
+}
+
 pub struct V2rayTask {
     node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
-    tcp_ping_property: AutoTcpPingProperty,
-    subscpt_property: SubscriptionProperty,
-    switch_property: SwitchProperty,
-    v2_property: V2rayProperty,
-    ping_property: PingProperty,
-    pub filter_property: FilterProperty,
+    property: V2rayTaskProperty,
 }
 
 impl V2rayTask {
+    pub fn from_file(path: &str) -> Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let property: V2rayTaskProperty = serde_json::from_reader(BufReader::new(file))?;
+        Ok(Self {
+            node_stats: Arc::new(Mutex::new(vec![])),
+            property,
+        })
+    }
+
     pub fn with_default() -> Self {
         Self {
             node_stats: Arc::new(Mutex::new(vec![])),
-            tcp_ping_property: AutoTcpPingProperty::default(),
-            subscpt_property: SubscriptionProperty::default(),
-            switch_property: SwitchProperty::default(),
-            v2_property: V2rayProperty::default(),
-            ping_property: PingProperty::default(),
-            filter_property: FilterProperty::default(),
+            property: V2rayTaskProperty {
+                auto_ping: AutoTcpPingProperty::default(),
+                subscpt: SubscriptionProperty::default(),
+                switch: SwitchProperty::default(),
+                v2: V2rayProperty::default(),
+                ping: PingProperty::default(),
+                filter: FilterProperty::default(),
+            },
         }
     }
 
@@ -143,13 +163,13 @@ impl V2rayTask {
     /// 根据订阅文件自动更新并加载到内存中。
     ///
     async fn auto_update_subscription(&mut self) -> Result<()> {
-        let url = self.subscpt_property.url.clone();
-        let path = self.subscpt_property.path.clone();
-        let interval = self.subscpt_property.update_interval;
-        let max_retries_failed = self.subscpt_property.max_retries_failed;
+        let url = self.property.subscpt.url.clone();
+        let path = self.property.subscpt.path.clone();
+        let interval = self.property.subscpt.update_interval;
+        let max_retries_failed = self.property.subscpt.max_retries_failed;
         let (min_itv, max_itv) = (
-            self.subscpt_property.min_retry_interval,
-            self.subscpt_property.max_retry_interval,
+            self.property.subscpt.min_retry_interval,
+            self.property.subscpt.max_retry_interval,
         );
 
         let first_interval = {
@@ -201,9 +221,9 @@ impl V2rayTask {
             rtt_min: None,
         };
 
-        let path = &self.subscpt_property.path;
+        let path = &self.property.subscpt.path;
         log::debug!("loading nodes from path: {}", path);
-        let name_regex = if let Some(r) = &self.filter_property.node_name_regex {
+        let name_regex = if let Some(r) = &self.property.filter.node_name_regex {
             Some(Regex::new(r)?)
         } else {
             None
@@ -227,19 +247,20 @@ impl V2rayTask {
     }
 
     async fn auto_swith(&mut self) {
-        let check_url = self.switch_property.check_url.clone();
-        let timeout = self.switch_property.check_timeout;
-        let max_retries_failed = self.switch_property.max_retries_failed;
+        let check_url = self.property.switch.check_url.clone();
+        let timeout = self.property.switch.check_timeout;
+        let max_retries_failed = self.property.switch.max_retries_failed;
         let (min_itv, max_itv) = (
-            self.switch_property.min_retry_interval,
-            self.switch_property.max_retry_interval,
+            self.property.switch.min_retry_interval,
+            self.property.switch.max_retry_interval,
         );
-        let selected_size = self.switch_property.lb_nodes_size as usize;
+        let selected_size = self.property.switch.lb_nodes_size as usize;
         let node_stats = self.node_stats.clone();
-        let vp = self.v2_property.clone();
+        let vp = self.property.v2.clone();
 
         let proxy: Option<String> = self
-            .v2_property
+            .property
+            .v2
             .port
             .as_ref()
             .map(|p| "socks5://127.0.0.1:".to_string() + &p.to_string());
@@ -301,14 +322,14 @@ impl V2rayTask {
 
     /// 成功ping时使用默认的interval，如果失败则使用`PingTaskProperty::max_retry_interval`不断重试
     fn auto_ping(&mut self) {
-        let ping_interval = self.tcp_ping_property.ping_interval;
-        let vp = Arc::new(self.v2_property.clone());
-        let pp = Arc::new(self.ping_property.clone());
+        let ping_interval = self.property.auto_ping.ping_interval;
+        let vp = Arc::new(self.property.v2.clone());
+        let pp = Arc::new(self.property.ping.clone());
         let stats_lock = self.node_stats.clone();
-        let max_retries = self.tcp_ping_property.max_retries_failed;
+        let max_retries = self.property.auto_ping.max_retries_failed;
         let (min_itv, max_itv) = (
-            self.tcp_ping_property.min_retry_interval,
-            self.tcp_ping_property.max_retry_interval,
+            self.property.auto_ping.min_retry_interval,
+            self.property.auto_ping.max_retry_interval,
         );
 
         tokio::spawn(async move {
@@ -360,7 +381,10 @@ async fn switch_v2ray(
         } else {
             &nodes[..selected_size]
         };
-        nodes.iter().map(|v| (v.0.clone(), v.1.clone())).collect::<Vec<_>>()
+        nodes
+            .iter()
+            .map(|v| (v.0.clone(), v.1.clone()))
+            .collect::<Vec<_>>()
     };
 
     if log::log_enabled!(log::Level::Info) {
@@ -375,50 +399,6 @@ async fn switch_v2ray(
     let child = restart_load_balance(&vp, &nodes, V2_CHILD.lock().await.take()).await?;
     V2_CHILD.lock().await.replace(child);
     Ok(())
-}
-
-fn next_beb_interval(min_itv: Duration, max_itv: Duration) -> impl Fn(Duration, usize) -> Duration {
-    move |last, _retries| {
-        let next = last + last;
-        if next < min_itv {
-            min_itv
-        } else if next > max_itv {
-            max_itv
-        } else {
-            next
-        }
-    }
-}
-
-/// 如果func执行成功则使用interval sleep，否则使用max_retry_interval
-async fn loop_with_interval<F, Fut, T>(
-    func: F,
-    interval: Duration,
-    max_retry_interval: Duration,
-) -> !
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<T>> + Send + 'static,
-    T: Debug + Display,
-{
-    loop {
-        let interval = match func().await {
-            Ok(retries) => {
-                log::debug!("loop successful on retries: {}", retries);
-                interval
-            }
-            Err(e) => {
-                log::warn!(
-                    "use max retry interval {:?} for loop failed: {}",
-                    max_retry_interval,
-                    e
-                );
-                max_retry_interval
-            }
-        };
-        log::debug!("loop sleeping with interval: {:?}", interval);
-        sleep(interval).await;
-    }
 }
 
 async fn check_networking_owned(
@@ -514,70 +494,6 @@ async fn update_tcp_ping_stats(
     Ok(())
 }
 
-async fn retry_on_owned<F, Fut>(
-    func: Arc<F>,
-    next_itv_func: impl Fn(Duration, usize) -> Duration,
-    max_retries: usize,
-    succ_or_fail: bool,
-) -> Result<usize>
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<()>>,
-{
-    retry_on(func.as_ref(), next_itv_func, max_retries, succ_or_fail).await
-}
-
-async fn retry_on<F, Fut>(
-    func: F,
-    next_itv_func: impl Fn(Duration, usize) -> Duration,
-    max_retries: usize,
-    succ_or_fail: bool,
-) -> Result<usize>
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<()>>,
-{
-    let retried = |r: Result<()>| {
-        if let Err(e) = &r {
-            log::trace!("there was an error retrying: {}", e);
-        }
-        (succ_or_fail && r.is_ok()) || (!succ_or_fail && r.is_err())
-    };
-    let name = if !succ_or_fail { "success" } else { "failed" };
-    let mut last_itv = Duration::from_nanos(0);
-    let mut retry_count = 0;
-    let start = Instant::now();
-    while retried(func().await) {
-        retry_count += 1;
-        if retry_count == std::usize::MAX {
-            panic!("overflow usize retry_count");
-        }
-        if retry_count > max_retries {
-            return Err(anyhow!(
-                "retrying on {} reaches max retries {} exit",
-                name,
-                max_retries
-            ));
-        }
-        last_itv = next_itv_func(last_itv, retry_count);
-        log::debug!(
-            "sleeping {:?} on retries: {}, max retries: {}",
-            last_itv,
-            retry_count,
-            max_retries
-        );
-        sleep(last_itv).await;
-    }
-    let d = Instant::now() - start;
-    log::debug!(
-        "{} exit after {} retries, it takes {:?}",
-        name,
-        retry_count,
-        d
-    );
-    Ok(retry_count)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,7 +511,7 @@ mod tests {
     #[tokio::test]
     async fn load_nodes_name_filter() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.filter_property = FilterProperty {
+        task.property.filter = FilterProperty {
             node_name_regex: Some("安徽→香港01".to_owned()),
         };
         task.load_nodes().await?;
@@ -607,7 +523,7 @@ mod tests {
     #[tokio::test]
     async fn ping_task_test() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.filter_property = FilterProperty {
+        task.property.filter = FilterProperty {
             node_name_regex: Some("安徽→香港01".to_owned()),
         };
         task.load_nodes().await?;
@@ -615,8 +531,8 @@ mod tests {
 
         update_tcp_ping_stats(
             task.node_stats.clone(),
-            &task.v2_property,
-            &task.ping_property,
+            &task.property.v2,
+            &task.property.ping,
         )
         .await?;
 
@@ -632,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn ping_task_error_when_unavailable_address() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.filter_property = FilterProperty {
+        task.property.filter = FilterProperty {
             node_name_regex: Some("安徽→香港01".to_owned()),
         };
         task.load_nodes().await?;
@@ -645,8 +561,8 @@ mod tests {
 
         let res = update_tcp_ping_stats(
             task.node_stats.clone(),
-            &task.v2_property,
-            &task.ping_property,
+            &task.property.v2,
+            &task.property.ping,
         )
         .await;
         assert!(res.is_err());
@@ -673,32 +589,31 @@ mod tests {
     #[tokio::test]
     async fn switch_v2ray_test() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.filter_property = FilterProperty {
+        task.property.filter = FilterProperty {
             // node_name_regex: Some("安徽→香港01".to_owned()),
             node_name_regex: Some("香港01".to_owned()),
         };
-        let sp = task.switch_property.clone();
+        let sp = task.property.switch.clone();
         // task.vp;
         task.load_nodes().await?;
 
         update_tcp_ping_stats(
             task.node_stats.clone(),
-            &task.v2_property,
-            &task.ping_property,
+            &task.property.v2,
+            &task.property.ping,
         )
         .await?;
 
-        switch_v2ray(task.node_stats, 3, &task.v2_property).await?;
+        switch_v2ray(task.node_stats, 3, &task.property.v2).await?;
         check_networking(
             &sp.check_url,
             sp.check_timeout,
-            Some(&("socks5://127.0.0.1:".to_owned() + &task.v2_property.port.unwrap().to_string())),
+            Some(&("socks5://127.0.0.1:".to_owned() + &task.property.v2.port.unwrap().to_string())),
         )
         .await?;
         Ok(())
     }
 
-    
     // #[tokio::test]
     // async fn auto_update_subscription() -> Result<()> {
     //     let mut task = V2rayTask::with_default();
@@ -713,7 +628,7 @@ mod tests {
     // #[tokio::test]
     // async fn auto_swith_test() -> Result<()> {
     //     let mut task = V2rayTask::with_default();
-    //     task.filter_property = FilterProperty {
+    //     task.property.filter = FilterProperty {
     //         node_name_regex: Some("安徽→香港01".to_owned()),
     //         // node_name_regex: Some("香港01".to_owned()),
     //     };
@@ -722,7 +637,7 @@ mod tests {
     //     update_tcp_ping_stats(
     //         task.node_stats.clone(),
     //         &task.v2_property,
-    //         &task.ping_property,
+    //         &task.property.ping,
     //     )
     //     .await?;
 

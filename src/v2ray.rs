@@ -21,7 +21,7 @@ use tokio::{
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct V2rayProperty {
     pub bin_path: String,
     pub config_path: Option<String>,

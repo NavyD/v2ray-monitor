@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use task::V2rayTask;
+use task::v2ray_tasks::V2rayTask;
 use tokio::time::sleep;
 
 mod config;
@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
         .filter_module("reqwest", log::LevelFilter::Info)
         .init();
     let mut v2 = V2rayTask::with_default();
-    v2.filter_property.node_name_regex = Some("→香港02".to_owned());
+    // v2.proxy.node_name_regex = Some("→香港02".to_owned());
     v2.run().await?;
     loop {
         sleep(Duration::from_secs(30)).await;
