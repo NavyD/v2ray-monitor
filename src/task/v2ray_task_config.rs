@@ -1,4 +1,5 @@
 use std::{
+    env::{split_paths, var_os},
     fmt::{Debug, Display},
     io::BufReader,
     sync::Arc,
@@ -37,11 +38,11 @@ impl Default for FilterProperty {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Copy)]
 pub struct RetryProperty {
-    count: usize,
-    min_interval: Duration,
-    max_interval: Duration,
+    pub count: usize,
+    pub min_interval: Duration,
+    pub max_interval: Duration,
 }
 
 impl Default for RetryProperty {
@@ -56,10 +57,10 @@ impl Default for RetryProperty {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SubscriptionProperty {
-    path: String,
-    update_interval: Duration,
-    url: String,
-    retry_failed: RetryProperty,
+    pub path: String,
+    pub update_interval: Duration,
+    pub url: String,
+    pub retry_failed: RetryProperty,
 }
 
 impl Default for SubscriptionProperty {
@@ -73,14 +74,14 @@ impl Default for SubscriptionProperty {
             path: cur_subspt_path,
             update_interval: Duration::from_secs(60 * 60 * 12),
             url: "https://www.jinkela.site/link/ukWr5K49YjHIQGdL?sub=3".to_owned(),
-            retry_failed: Default::default()
+            retry_failed: Default::default(),
         }
     }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct AutoTcpPingProperty {
-    ping_interval: Duration,
-    retry_failed: RetryProperty,
+pub struct AutoTcpPingProperty {
+    pub ping_interval: Duration,
+    pub retry_failed: RetryProperty,
 }
 
 impl Default for AutoTcpPingProperty {
@@ -93,13 +94,11 @@ impl Default for AutoTcpPingProperty {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct SwitchProperty {
-    check_url: String,
-    check_timeout: Duration,
-
-    lb_nodes_size: u8,
-
-    retry: RetryProperty,
+pub struct SwitchProperty {
+    pub check_url: String,
+    pub check_timeout: Duration,
+    pub lb_nodes_size: u8,
+    pub retry: RetryProperty,
 }
 
 impl Default for SwitchProperty {
@@ -113,16 +112,56 @@ impl Default for SwitchProperty {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct V2rayProperty {
+    pub bin_path: Option<String>,
+    pub config_path: Option<String>,
+    pub concurr_num: Option<usize>,
+    pub port: Option<u16>,
+}
 
-#[derive(Debug, Deserialize, Serialize)]
+impl Default for V2rayProperty {
+    /// 设置bin path为PATH中的v2ra，，config置为Non，，concurr_num
+    /// 设为cpu_nums
+    ///
+    /// # panic
+    ///
+    /// 如果未在PATH中找到v2ray
+    fn default() -> Self {
+        Self {
+            bin_path: None,
+            config_path: None,
+            concurr_num: Some(num_cpus::get() * 2),
+            port: Some(1080),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PingProperty {
+    pub count: u8,
+    pub ping_url: String,
+    pub timeout: Duration,
+}
+
+impl Default for PingProperty {
+    fn default() -> Self {
+        PingProperty {
+            count: 3,
+            ping_url: "https://www.google.com/gen_204".into(),
+            timeout: Duration::from_secs(3),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub struct V2rayTaskProperty {
-    auto_ping: AutoTcpPingProperty,
-    subscpt: SubscriptionProperty,
-    switch: SwitchProperty,
-
-    v2: V2rayProperty,
-    ping: PingProperty,
-    filter: FilterProperty,
+    pub auto_ping: AutoTcpPingProperty,
+    pub subscpt: SubscriptionProperty,
+    pub switch: SwitchProperty,
+    pub v2: V2rayProperty,
+    pub ping: PingProperty,
+    pub filter: FilterProperty,
 }
 
 #[cfg(test)]
@@ -132,10 +171,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_name() -> anyhow::Result<()>{
-        let content = read_to_string("/home/navyd/Workspaces/projects/router-tasks/config.yaml")?;
-        let a: V2rayTaskProperty = serde_yaml::from_str(&content)?;
-        log::debug!("{:?}", a);
+    fn test_name() -> anyhow::Result<()> {
+        let content = read_to_string("config.yaml")?;
+        let property: V2rayTaskProperty = serde_yaml::from_str(&content)?;
+        log::debug!("property: {:?}", property);
         Ok(())
     }
 }

@@ -1,6 +1,8 @@
 use std::{
+    borrow::{Borrow, BorrowMut},
     cmp::Ordering,
     env::{split_paths, var_os},
+    ops::{Deref, DerefMut},
     process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
@@ -8,6 +10,8 @@ use std::{
 
 use crate::config::*;
 use crate::node::Node;
+use crate::task::v2ray_task_config::*;
+
 use anyhow::Result;
 
 use reqwest::Proxy;
@@ -16,70 +20,12 @@ use tokio::{
     io::*,
     net::TcpListener,
     process::{Child, Command},
-    sync::{mpsc::channel, Semaphore},
+    runtime::Runtime,
+    sync::{mpsc::channel, Mutex, Semaphore},
+    task::spawn_blocking,
 };
 
 use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct V2rayProperty {
-    pub bin_path: String,
-    pub config_path: Option<String>,
-    pub concurr_num: usize,
-    pub port: Option<u16>,
-}
-
-impl Default for V2rayProperty {
-    /// 设置bin path为PATH中的v2ra，，config置为Non，，concurr_num
-    /// 设为cpu_nums
-    ///
-    /// # panic
-    ///
-    /// 如果未在PATH中找到v2ray
-    fn default() -> Self {
-        let exe_name = "v2ray";
-        let bin_path = var_os("PATH")
-            .and_then(|val| {
-                split_paths(&val).find_map(|path| {
-                    if path.is_file() && path.ends_with(exe_name) {
-                        return Some(path);
-                    }
-                    let path = path.join(exe_name);
-                    if path.is_file() {
-                        return Some(path);
-                    }
-                    None
-                })
-            })
-            .and_then(|path| path.to_str().map(|s| s.to_owned()))
-            .unwrap_or_else(|| panic!("not found v2ray in env var PATH"));
-        log::debug!("found v2ray bin path: {}", bin_path);
-
-        Self {
-            bin_path,
-            config_path: None,
-            concurr_num: num_cpus::get(),
-            port: Some(1080),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PingProperty {
-    pub count: u8,
-    pub ping_url: String,
-    pub timeout: Duration,
-}
-
-impl Default for PingProperty {
-    fn default() -> Self {
-        PingProperty {
-            count: 3,
-            ping_url: "https://www.google.com/gen_204".into(),
-            timeout: Duration::from_secs(3),
-        }
-    }
-}
 
 #[derive(Debug, Eq, Clone)]
 pub struct TcpPingStatistic {
@@ -166,22 +112,165 @@ impl TcpPingStatistic {
     }
 }
 
-pub async fn restart_load_balance(
-    vp: &V2rayProperty,
-    nodes: &[&Node],
-    v2_child: Option<Child>,
-) -> Result<Child> {
-    if let Some(mut child) = v2_child {
-        log::debug!("killing old v2ray proccess: {:?}", child.id());
-        child.kill().await?;
-    } else {
-        log::debug!("killing all v2ray proccess");
-        killall_v2ray().await?;
-    }
-    start_load_balance(vp, nodes).await
+#[derive(Clone)]
+pub struct V2ray {
+    inner: Arc<V2rayRef>,
 }
 
-pub async fn killall_v2ray() -> Result<()> {
+impl V2ray {
+    pub fn new(property: V2rayProperty) -> Self {
+        Self {
+            inner: Arc::new(V2rayRef::new(property)),
+        }
+    }
+}
+
+impl Deref for V2ray {
+    type Target = V2rayRef;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.borrow()
+    }
+}
+
+impl DerefMut for V2ray {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.borrow_mut()
+    }
+}
+
+pub struct V2rayRef {
+    property: V2rayProperty,
+    v2_child: Mutex<Option<Child>>,
+    bin_path: String,
+    concurr_num: usize,
+}
+
+impl V2rayRef {
+    pub fn new(property: V2rayProperty) -> Self {
+        let bin_path = property
+            .bin_path
+            .clone()
+            .unwrap_or_else(|| find_bin_path("v2ray").expect("not found v2ray bin path"));
+        let concurr_num = property.concurr_num.unwrap_or_else(num_cpus::get);
+        Self {
+            property,
+            v2_child: Mutex::new(None),
+            bin_path,
+            concurr_num,
+        }
+    }
+
+    pub async fn restart_load_balance(&self, nodes: &[&Node]) -> Result<()> {
+        if let Some(mut child) = self.v2_child.lock().await.take() {
+            log::debug!("killing old v2ray proccess: {:?}", child.id());
+            child.kill().await?;
+        } else {
+            log::debug!("killing all v2ray proccess");
+            killall_v2ray().await?;
+        }
+        let mut child = self.v2_child.lock().await;
+        *child = Some(self.start_load_balance(nodes).await?);
+        Ok(())
+    }
+
+    /// 使用负载均衡配置启动v2ray。如果`V2rayProperty::config_path`为空则使用默认的配置
+    async fn start_load_balance(&self, nodes: &[&Node]) -> Result<Child> {
+        let vp = &self.property;
+        let config = if let Some(path) = &vp.config_path {
+            let contents = read_to_string(path).await?;
+            apply_config(&contents, nodes, None)?
+        } else {
+            gen_load_balance_config(
+                nodes,
+                vp.port.expect("not found port in gen_load_balance_config"),
+            )?
+        };
+        start(&self.bin_path, &config).await
+    }
+
+    /// ping nodes并返回统计数据
+    ///
+    /// 用户可使用[`V2rayProperty::concurr_num`]控制并发v2ray数，但对系统有内存要求
+    pub async fn tcp_ping_nodes(
+        &self,
+        nodes: Vec<Node>,
+        ping_property: &PingProperty,
+    ) -> Vec<(Node, TcpPingStatistic)> {
+        let size = nodes.len();
+        let mut res = vec![];
+        log::debug!("start tcp ping {} nodes", size);
+
+        let (tx, mut rx) = channel(1);
+        let semaphore = Arc::new(Semaphore::new(self.concurr_num));
+        let start = Instant::now();
+
+        for node in nodes {
+            let bin_path = self.bin_path.clone();
+            let pp = ping_property.clone();
+            let semaphore = semaphore.clone();
+            let tx = tx.clone();
+            let port = get_available_port()
+                .await
+                .expect("not found available port");
+
+            tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                let config = gen_tcp_ping_config(&node, port).unwrap_or_else(|e| {
+                    panic!(
+                        "generate tcp ping config error: {}, with node: {:?}",
+                        e, node
+                    )
+                });
+                let ps = tcp_ping(&bin_path, &config, port, &pp).await;
+                log::debug!(
+                    "got tcp ping statistic. node: {:?}, ps: {:?}",
+                    node.remark,
+                    ps
+                );
+                tx.send((node, ps)).await.unwrap();
+            });
+        }
+
+        // drop(tx);
+
+        while let Some((node, ps)) = rx.recv().await {
+            if let Err(e) = ps {
+                log::info!(
+                    "received error tcp ping node: {:?}, ping statistic: {}",
+                    node.remark,
+                    e
+                );
+            } else {
+                res.push((node, ps.unwrap()));
+            }
+        }
+        let perform_duration = Instant::now() - start;
+        log::debug!("tcp ping {} nodes takes {:?}", size, perform_duration);
+        res
+    }
+}
+
+fn find_bin_path(name: &str) -> Result<String> {
+    let exe_name = "v2ray";
+    var_os("PATH")
+        .and_then(|val| {
+            split_paths(&val).find_map(|path| {
+                if path.is_file() && path.ends_with(exe_name) {
+                    return Some(path);
+                }
+                let path = path.join(exe_name);
+                if path.is_file() {
+                    return Some(path);
+                }
+                None
+            })
+        })
+        .and_then(|path| path.to_str().map(|s| s.to_owned()))
+        .ok_or_else(|| anyhow::anyhow!("not found {} in env var PATH", name))
+}
+
+async fn killall_v2ray() -> Result<()> {
     let out = Command::new("killall")
         .arg("-9")
         .arg("v2ray")
@@ -199,80 +288,6 @@ pub async fn killall_v2ray() -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// 使用负载均衡配置启动v2ray。如果`V2rayProperty::config_path`为空则使用默认的配置
-pub async fn start_load_balance(vp: &V2rayProperty, nodes: &[&Node]) -> Result<Child> {
-    let config = if let Some(path) = &vp.config_path {
-        let contents = read_to_string(path).await?;
-        apply_config(&contents, nodes, None)?
-    } else {
-        gen_load_balance_config(
-            nodes,
-            vp.port.expect("not found port in gen_load_balance_config"),
-        )?
-    };
-    start(&vp.bin_path, &config).await
-}
-
-/// ping nodes并返回统计数据
-///
-/// 用户可使用[`V2rayProperty::concurr_num`]控制并发v2ray数，但对系统有内存要求
-pub async fn tcp_ping_nodes(
-    nodes: Vec<Node>,
-    v2ray_property: &V2rayProperty,
-    ping_property: &PingProperty,
-) -> Vec<(Node, TcpPingStatistic)> {
-    async fn ping(bin_path: &str, pp: &PingProperty, node: &Node) -> Result<TcpPingStatistic> {
-        let local_port = get_available_port().await?;
-        log::debug!("found available port: {}", local_port);
-        let config = gen_tcp_ping_config(&node, local_port)?;
-        tcp_ping(bin_path, &config, local_port, pp).await
-    }
-
-    let size = nodes.len();
-    let mut res = vec![];
-    log::debug!("start tcp ping {} nodes", size);
-
-    let (tx, mut rx) = channel(1);
-    let semaphore = Arc::new(Semaphore::new(v2ray_property.concurr_num));
-    let start = Instant::now();
-
-    for node in nodes {
-        let bin_path = v2ray_property.bin_path.clone();
-        let pp = ping_property.clone();
-        let semaphore = semaphore.clone();
-        let tx = tx.clone();
-
-        tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
-
-            let ps = ping(&bin_path, &pp, &node).await;
-            log::debug!(
-                "got tcp ping statistic. node: {:?}, ps: {:?}",
-                node.remark,
-                ps
-            );
-            tx.send((node, ps)).await.unwrap();
-        });
-    }
-
-    drop(tx);
-
-    while let Some((node, ps)) = rx.recv().await {
-        if let Err(e) = ps {
-            log::info!(
-                "received error tcp ping node: {:?}, ping statistic: {}",
-                node.remark,
-                e
-            );
-        } else {
-            res.push((node, ps.unwrap()));
-        }
-    }
-    let perform_duration = Instant::now() - start;
-    log::debug!("tcp ping {} nodes takes {:?}", size, perform_duration);
-    res
 }
 
 /// 从bin path中使用config启动v2ray 并返回子进程 由用户控制
@@ -300,7 +315,7 @@ async fn start(bin_path: &str, config: &str) -> Result<Child> {
     let out = child.stdout.as_mut().expect("not found child stdout");
     let mut reader = BufReader::new(out).lines();
     while let Some(line) = reader.next_line().await? {
-        log::trace!("v2ray stdout line: {}", line);
+        log::debug!("v2ray stdout line: {}", line);
         if line.contains("started") && line.contains("v2ray.com/core: V2Ray") {
             break;
         }
@@ -316,6 +331,8 @@ async fn get_available_port() -> Result<u16> {
 }
 
 /// 应用配置启动v2ray并执行tcp ping
+///
+/// config中的port必须与local_port一样
 async fn tcp_ping(
     bin_path: &str,
     config: &str,
@@ -351,7 +368,7 @@ async fn tcp_ping(
                 .await
                 .map(|d| (i, Some(d)))
                 .unwrap_or_else(|e| {
-                    log::debug!("not found duration: {}", e);
+                    log::trace!("not found duration: {}", e);
                     (i, None)
                 });
             tx.send(idx_du)
@@ -399,19 +416,38 @@ async fn measure_duration_with_proxy(
 }
 
 #[cfg(test)]
-mod v2ray_tests {
+mod tests {
 
     use std::sync::Once;
 
     use super::*;
     use log::LevelFilter;
 
+    #[cfg(test)]
+    mod v2ray_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn tcp_ping() -> Result<()> {
+            let v2 = V2ray::new(Default::default());
+            let pp = Default::default();
+            let nodes = vec![get_node(), get_node(), get_node()];
+            let ps = v2.tcp_ping_nodes(nodes, &pp).await;
+            log::debug!("{:?}", ps);
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn start_test() -> Result<()> {
         let node = get_node();
         let vp = V2rayProperty::default();
         let config = gen_tcp_ping_config(&node, get_available_port().await?)?;
-        start(&vp.bin_path, &config).await?;
+        let bin_path = vp
+            .bin_path
+            .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
+
+        start(&bin_path, &config).await?;
         Ok(())
     }
 
@@ -424,8 +460,11 @@ mod v2ray_tests {
 
         let local_port = get_available_port().await?;
         let config = gen_tcp_ping_config(&node, local_port)?;
+        let bin_path = vp
+            .bin_path
+            .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
 
-        let mut child = start(&vp.bin_path, &config).await?;
+        let mut child = start(&bin_path, &config).await?;
 
         measure_duration_with_proxy(&pp.ping_url, local_port, Duration::from_secs(2))
             .await
@@ -441,8 +480,11 @@ mod v2ray_tests {
         let pp = PingProperty::default();
         let local_port = get_available_port().await?;
         let config = gen_tcp_ping_config(&node, local_port)?;
+        let bin_path = vp
+            .bin_path
+            .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
 
-        let stats = tcp_ping(&vp.bin_path, &config, local_port, &pp).await?;
+        let stats = tcp_ping(&bin_path, &config, local_port, &pp).await?;
         assert_eq!(
             stats.durations.len(),
             PingProperty::default().count as usize
@@ -460,8 +502,11 @@ mod v2ray_tests {
         let pp = PingProperty::default();
         let local_port = get_available_port().await?;
         let config = gen_tcp_ping_config(&node, local_port)?;
+        let bin_path = vp
+            .bin_path
+            .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
 
-        let stats = tcp_ping(&vp.bin_path, &config, local_port, &pp).await?;
+        let stats = tcp_ping(&bin_path, &config, local_port, &pp).await?;
 
         assert_eq!(
             stats.durations.len(),

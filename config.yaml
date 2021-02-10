@@ -2,53 +2,52 @@ auto_ping:
   ping_interval:
     secs: 10
     nanos: 10
-  retry_failed:    
+  retry_failed:
     count: 3
-    min_interval: 
-        secs: 10
-        nanos: 10
-    max_interval: 
-        secs: 10
-        nanos: 10
+    min_interval:
+      secs: 10
+      nanos: 10
+    max_interval:
+      secs: 10
+      nanos: 10
 subscpt:
-  path: /tmp/subscription.txt
+  path: v2ray-subscription.txt
   url: https://www.jinkela.site/link/ukWr5K49YjHIQGdL?sub=3
   update_interval:
-    secs: 10
-    nanos: 10
-  retry_failed:    
+    secs: 43200
+    nanos: 0
+  retry_failed:
     count: 3
-    min_interval: 
-        secs: 10
-        nanos: 10
-    max_interval: 
-        secs: 10
-        nanos: 10
+    min_interval:
+      secs: 2
+      nanos: 0
+    max_interval:
+      secs: 60
+      nanos: 0
 switch:
   check_url: https://www.google.com/gen_204
-  check_timeout: 
-    secs: 10
-    nanos: 10
+  check_timeout:
+    secs: 2
+    nanos: 0
   lb_nodes_size: 3
-  retry: 
+  retry:
     count: 3
-    min_interval: 
-        secs: 10
-        nanos: 10
-    max_interval: 
-        secs: 10
-        nanos: 10
+    min_interval:
+      secs: 2
+      nanos: 0
+    max_interval:
+      secs: 30
+      nanos: 0
 
 v2:
-  bin_path: /usr/bin/v2ray
   config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
-  concurr_num: 10
+  concurr_num: 2
 
 ping:
   count: 3
   ping_url: https://www.google.com/gen_204
-  timeout: 
+  timeout:
     secs: 2
     nanos: 0
 filter:
-  node_name_regex: ""
+  node_name_regex: "→香港01"

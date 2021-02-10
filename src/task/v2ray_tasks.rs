@@ -7,6 +7,7 @@ use std::{
 
 use crate::{
     node::{load_subscription_nodes_from_file, Node},
+    task::v2ray_task_config::*,
     v2ray::*,
 };
 use anyhow::{anyhow, Result};
@@ -24,135 +25,27 @@ use tokio::{
     time::sleep,
 };
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct FilterProperty {
-    pub node_name_regex: Option<String>,
-}
-
-impl Default for FilterProperty {
-    fn default() -> Self {
-        Self {
-            node_name_regex: None,
-        }
-    }
-}
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SubscriptionProperty {
-    path: String,
-    update_interval: Duration,
-    url: String,
-
-    max_retries_failed: usize,
-    min_retry_interval: Duration,
-    max_retry_interval: Duration,
-}
-
-impl Default for SubscriptionProperty {
-    fn default() -> Self {
-        let cur_subspt_path = std::env::current_dir()
-            .map(|d| d.join("v2ray-subscription.txt"))
-            .ok()
-            .and_then(|d| d.to_str().map(|s| s.to_owned()))
-            .unwrap();
-        Self {
-            path: cur_subspt_path,
-            update_interval: Duration::from_secs(60 * 60 * 12),
-            url: "https://www.jinkela.site/link/ukWr5K49YjHIQGdL?sub=3".to_owned(),
-
-            max_retries_failed: 3,
-            max_retry_interval: Duration::from_secs(60),
-            min_retry_interval: Duration::from_secs(2),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct AutoTcpPingProperty {
-    ping_interval: Duration,
-    max_retries_failed: usize,
-    min_retry_interval: Duration,
-    max_retry_interval: Duration,
-}
-
-impl Default for AutoTcpPingProperty {
-    fn default() -> Self {
-        Self {
-            ping_interval: Duration::from_secs(60 * 10),
-            max_retries_failed: 3,
-            max_retry_interval: Duration::from_secs(60),
-            min_retry_interval: Duration::from_secs(2),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct SwitchProperty {
-    check_url: String,
-    check_timeout: Duration,
-
-    lb_nodes_size: u8,
-
-    max_retries_failed: usize,
-    max_retry_interval: Duration,
-    min_retry_interval: Duration,
-}
-
-impl Default for SwitchProperty {
-    fn default() -> Self {
-        Self {
-            check_url: "https://www.google.com/gen_204".to_owned(),
-            check_timeout: Duration::from_secs(3),
-            lb_nodes_size: 3,
-            max_retries_failed: 3,
-            max_retry_interval: Duration::from_secs(30),
-            min_retry_interval: Duration::from_secs(1),
-        }
-    }
-}
-
-static V2_CHILD: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct V2rayTaskProperty {
-    auto_ping: AutoTcpPingProperty,
-    subscpt: SubscriptionProperty,
-    switch: SwitchProperty,
-
-    v2: V2rayProperty,
-    ping: PingProperty,
-    filter: FilterProperty,
-}
-
 pub struct V2rayTask {
     node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
+    v2: V2ray,
     property: V2rayTaskProperty,
 }
 
 impl V2rayTask {
-    pub fn from_file(path: &str) -> Result<Self> {
-        let file = std::fs::File::open(path)?;
-        let property: V2rayTaskProperty = serde_json::from_reader(BufReader::new(file))?;
-        Ok(Self {
-            node_stats: Arc::new(Mutex::new(vec![])),
-            property,
-        })
-    }
-
-    pub fn with_default() -> Self {
+    pub fn new(property: V2rayTaskProperty) -> Self {
         Self {
             node_stats: Arc::new(Mutex::new(vec![])),
-            property: V2rayTaskProperty {
-                auto_ping: AutoTcpPingProperty::default(),
-                subscpt: SubscriptionProperty::default(),
-                switch: SwitchProperty::default(),
-                v2: V2rayProperty::default(),
-                ping: PingProperty::default(),
-                filter: FilterProperty::default(),
-            },
+            v2: V2ray::new(property.v2.clone()),
+            property,
         }
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub fn with_default() -> Self {
+        let property = V2rayTaskProperty::default();
+        Self::new(property)
+    }
+
+    pub async fn run(&self) -> Result<()> {
         self.load_nodes().await?;
         self.auto_ping();
         self.auto_update_subscription().await?;
@@ -162,15 +55,11 @@ impl V2rayTask {
 
     /// 根据订阅文件自动更新并加载到内存中。
     ///
-    async fn auto_update_subscription(&mut self) -> Result<()> {
+    async fn auto_update_subscription(&self) -> Result<()> {
         let url = self.property.subscpt.url.clone();
         let path = self.property.subscpt.path.clone();
         let interval = self.property.subscpt.update_interval;
-        let max_retries_failed = self.property.subscpt.max_retries_failed;
-        let (min_itv, max_itv) = (
-            self.property.subscpt.min_retry_interval,
-            self.property.subscpt.max_retry_interval,
-        );
+        let retry = self.property.subscpt.retry_failed;
 
         let first_interval = {
             let md_interval = File::open(&path)
@@ -198,20 +87,20 @@ impl V2rayTask {
                 move || {
                     retry_on_owned(
                         task.clone(),
-                        next_beb_interval(min_itv, max_itv),
-                        max_retries_failed,
+                        next_beb_interval(retry.min_interval, retry.max_interval),
+                        retry.count,
                         false,
                     )
                 },
                 interval,
-                max_itv,
+                retry.max_interval,
             )
             .await;
         });
         Ok(())
     }
 
-    async fn load_nodes(&mut self) -> Result<()> {
+    async fn load_nodes(&self) -> Result<()> {
         const EMPTY_PS: TcpPingStatistic = TcpPingStatistic {
             durations: vec![],
             count: 0,
@@ -246,17 +135,17 @@ impl V2rayTask {
         Ok(())
     }
 
-    async fn auto_swith(&mut self) {
+    async fn auto_swith(&self) {
         let check_url = self.property.switch.check_url.clone();
         let timeout = self.property.switch.check_timeout;
-        let max_retries_failed = self.property.switch.max_retries_failed;
-        let (min_itv, max_itv) = (
-            self.property.switch.min_retry_interval,
-            self.property.switch.max_retry_interval,
+        let (max_retries_failed, min_itv, max_itv) = (
+            self.property.switch.retry.count,
+            self.property.switch.retry.min_interval,
+            self.property.switch.retry.max_interval,
         );
         let selected_size = self.property.switch.lb_nodes_size as usize;
         let node_stats = self.node_stats.clone();
-        let vp = self.property.v2.clone();
+        let v2 = self.v2.clone();
 
         let proxy: Option<String> = self
             .property
@@ -272,7 +161,6 @@ impl V2rayTask {
 
             let mut last_checked = false;
             let mut max_retries = max_retries_failed;
-
             loop {
                 log::debug!("retrying check networking");
                 match retry_on_owned(
@@ -302,7 +190,7 @@ impl V2rayTask {
                         if !last_checked {
                             log::debug!("switching nodes");
                             if let Err(e) =
-                                switch_v2ray(node_stats.clone(), selected_size, &vp).await
+                                switch_v2ray(node_stats.clone(), selected_size, &v2).await
                             {
                                 log::warn!("switch v2ray failed: {}", e);
                             }
@@ -321,35 +209,31 @@ impl V2rayTask {
     }
 
     /// 成功ping时使用默认的interval，如果失败则使用`PingTaskProperty::max_retry_interval`不断重试
-    fn auto_ping(&mut self) {
+    fn auto_ping(&self) {
         let ping_interval = self.property.auto_ping.ping_interval;
-        let vp = Arc::new(self.property.v2.clone());
         let pp = Arc::new(self.property.ping.clone());
         let stats_lock = self.node_stats.clone();
-        let max_retries = self.property.auto_ping.max_retries_failed;
-        let (min_itv, max_itv) = (
-            self.property.auto_ping.min_retry_interval,
-            self.property.auto_ping.max_retry_interval,
-        );
+        let retry = self.property.auto_ping.retry_failed;
+        let v2 = self.v2.clone();
 
         tokio::spawn(async move {
             loop_with_interval(
                 move || {
-                    let vp = vp.clone();
+                    let v2 = v2.clone();
                     let pp = pp.clone();
                     let stats_lock = stats_lock.clone();
                     let task = move || {
-                        update_tcp_ping_stats_owned(stats_lock.clone(), vp.clone(), pp.clone())
+                        update_tcp_ping_stats_owned(stats_lock.clone(), v2.clone(), pp.clone())
                     };
                     retry_on(
                         task,
-                        next_beb_interval(min_itv, max_itv),
-                        max_retries,
+                        next_beb_interval(retry.min_interval, retry.max_interval),
+                        retry.count,
                         false,
                     )
                 },
                 ping_interval,
-                max_itv,
+                retry.max_interval,
             )
             .await;
         });
@@ -359,7 +243,7 @@ impl V2rayTask {
 async fn switch_v2ray(
     node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
     selected_size: usize,
-    vp: &V2rayProperty,
+    v2: &V2ray,
 ) -> Result<()> {
     if node_stats
         .lock()
@@ -396,8 +280,7 @@ async fn switch_v2ray(
     }
 
     let nodes = nodes.iter().map(|v| &v.0).collect::<Vec<_>>();
-    let child = restart_load_balance(&vp, &nodes, V2_CHILD.lock().await.take()).await?;
-    V2_CHILD.lock().await.replace(child);
+    v2.restart_load_balance(&nodes).await?;
     Ok(())
 }
 
@@ -439,10 +322,10 @@ async fn update_subscription_owned(url: String, path: String) -> Result<()> {
 
 async fn update_tcp_ping_stats_owned(
     node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
-    vp: Arc<V2rayProperty>,
+    v2: V2ray,
     pp: Arc<PingProperty>,
 ) -> Result<()> {
-    update_tcp_ping_stats(node_stats, vp.as_ref(), pp.as_ref()).await
+    update_tcp_ping_stats(node_stats, v2, pp.as_ref()).await
 }
 
 /// 执行ping任务后通过tcp ping排序应用到node_stats中
@@ -457,7 +340,7 @@ async fn update_tcp_ping_stats_owned(
 /// * 如果tcp ping后数量与node_stats原始数量对不上
 async fn update_tcp_ping_stats(
     node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
-    vp: &V2rayProperty,
+    v2: V2ray,
     pp: &PingProperty,
 ) -> Result<()> {
     let nodes = {
@@ -470,7 +353,7 @@ async fn update_tcp_ping_stats(
     };
     let old_size = nodes.len();
 
-    let mut stats = tcp_ping_nodes(nodes, &vp, &pp).await;
+    let mut stats = v2.tcp_ping_nodes(nodes, &pp).await;
     log::debug!("tcp ping completed with {} size", stats.len());
     if stats.len() != old_size {
         panic!(
@@ -500,7 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_nodes_test() -> Result<()> {
-        let mut task = V2rayTask::with_default();
+        let task = V2rayTask::with_default();
         task.load_nodes().await?;
         let stats = task.node_stats.lock().await;
         assert!(!stats.is_empty());
@@ -531,7 +414,7 @@ mod tests {
 
         update_tcp_ping_stats(
             task.node_stats.clone(),
-            &task.property.v2,
+            task.v2.clone(),
             &task.property.ping,
         )
         .await?;
@@ -561,7 +444,7 @@ mod tests {
 
         let res = update_tcp_ping_stats(
             task.node_stats.clone(),
-            &task.property.v2,
+            task.v2.clone(),
             &task.property.ping,
         )
         .await;
@@ -599,12 +482,12 @@ mod tests {
 
         update_tcp_ping_stats(
             task.node_stats.clone(),
-            &task.property.v2,
+            task.v2.clone(),
             &task.property.ping,
         )
         .await?;
 
-        switch_v2ray(task.node_stats, 3, &task.property.v2).await?;
+        switch_v2ray(task.node_stats, 3, &task.v2).await?;
         check_networking(
             &sp.check_url,
             sp.check_timeout,
@@ -617,7 +500,7 @@ mod tests {
     // #[tokio::test]
     // async fn auto_update_subscription() -> Result<()> {
     //     let mut task = V2rayTask::with_default();
-    //     task.subscpt_property.update_interval = Duration::from_secs(3);
+    //     task.property.subscpt.update_interval = Duration::from_secs(3);
     //     // mock failure
     //     // task.subspt_property.url = "test.a.b".to_owned();
     //     task.auto_update_subscription().await?;
@@ -636,7 +519,7 @@ mod tests {
 
     //     update_tcp_ping_stats(
     //         task.node_stats.clone(),
-    //         &task.v2_property,
+    //         task.v2.clone(),
     //         &task.property.ping,
     //     )
     //     .await?;
@@ -649,11 +532,11 @@ mod tests {
     // #[tokio::test]
     // async fn auto_ping_task_test() -> Result<()> {
     //     let mut task = V2rayTask::with_default();
-    //     task.fp = Arc::new(FilterProperty {
-    //         node_name_regex: Some("安徽→香港01".to_owned()),
-    //     });
-    //     task.ptp.ping_interval = Duration::from_secs(1);
+
+    //     task.property.filter.node_name_regex = Some("安徽→香港01".to_owned());
+    //     task.property.auto_ping.ping_interval = Duration::from_secs(1);
     //     task.load_nodes().await?;
+
     //     {
     //         let mut nodes = task.node_stats.lock().await;
     //         assert_eq!(nodes.len(), 1);

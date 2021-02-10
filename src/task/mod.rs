@@ -4,8 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub mod v2ray_tasks;
 pub mod v2ray_task_config;
+pub mod v2ray_tasks;
 
 use crate::{
     node::{load_subscription_nodes_from_file, Node},
@@ -23,7 +23,6 @@ use tokio::{
     sync::Mutex,
     time::sleep,
 };
-
 
 async fn retry_on_owned<F, Fut>(
     func: Arc<F>,
@@ -88,7 +87,6 @@ where
     );
     Ok(retry_count)
 }
-
 
 fn next_beb_interval(min_itv: Duration, max_itv: Duration) -> impl Fn(Duration, usize) -> Duration {
     move |last, _retries| {
