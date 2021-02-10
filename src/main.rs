@@ -2,11 +2,7 @@ use std::time::Duration;
 
 use task::v2ray_task_config::*;
 use task::v2ray_tasks::V2rayTask;
-use tokio::{
-    fs::{read_to_string, File},
-    time::sleep,
-};
-use v2ray::V2ray;
+use tokio::{fs::read_to_string, time::sleep};
 
 mod config;
 mod node;

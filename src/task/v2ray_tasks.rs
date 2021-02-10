@@ -1,9 +1,4 @@
-use std::{
-    fmt::{Debug, Display},
-    io::BufReader,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     node::{load_subscription_nodes_from_file, Node},
@@ -11,16 +6,14 @@ use crate::{
     v2ray::*,
 };
 use anyhow::{anyhow, Result};
-use futures::Future;
 
 use super::*;
-use once_cell::sync::Lazy;
+
 use regex::Regex;
 use reqwest::Proxy;
-use serde::{Deserialize, Serialize};
+
 use tokio::{
     fs::{write, File},
-    process::Child,
     sync::Mutex,
     time::sleep,
 };

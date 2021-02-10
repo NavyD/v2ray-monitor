@@ -7,22 +7,10 @@ use std::{
 pub mod v2ray_task_config;
 pub mod v2ray_tasks;
 
-use crate::{
-    node::{load_subscription_nodes_from_file, Node},
-    v2ray::*,
-};
 use anyhow::{anyhow, Result};
 use futures::Future;
 
-use once_cell::sync::Lazy;
-use regex::Regex;
-use reqwest::Proxy;
-use tokio::{
-    fs::{write, File},
-    process::Child,
-    sync::Mutex,
-    time::sleep,
-};
+use tokio::time::sleep;
 
 async fn retry_on_owned<F, Fut>(
     func: Arc<F>,
