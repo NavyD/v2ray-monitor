@@ -1,6 +1,6 @@
-use std::{fmt::Debug, time::Duration};
+use std::{fmt::Debug, ops::Deref, time::Duration};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FilterProperty {
@@ -95,6 +95,10 @@ pub struct V2rayProperty {
     pub config_path: Option<String>,
     pub concurr_num: Option<usize>,
     pub port: Option<u16>,
+
+    pub username: String,
+    pub host: String,
+    pub ssh_config_path: String,
 }
 
 impl Default for V2rayProperty {
@@ -110,6 +114,9 @@ impl Default for V2rayProperty {
             config_path: None,
             concurr_num: Some(num_cpus::get() * 2),
             port: Some(1080),
+            username: "root".to_string(),
+            host: "openwrt".to_string(),
+            ssh_config_path: "/var/etc/ssrplus/tcp-only-ssr-retcp.json".to_string(),
         }
     }
 }

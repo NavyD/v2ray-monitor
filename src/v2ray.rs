@@ -157,6 +157,19 @@ impl V2rayRef {
         }
     }
 
+    pub async fn restart_ssh_load_balance(&self, nodes: &[&Node]) -> Result<()> {
+        // get old config
+        let config = get_config_ssh(
+            &self.property.username,
+            &self.property.host,
+            &self.property.ssh_config_path,
+        )
+        .await?;
+        let config = apply_config(&config, nodes, None)?;
+        // start
+        restart_in_ssh_background(&config, &self.property.username, &self.property.host).await
+    }
+
     pub async fn restart_load_balance(&self, nodes: &[&Node]) -> Result<()> {
         if let Some(mut child) = self.v2_child.lock().await.take() {
             log::debug!("killing old v2ray proccess: {:?}", child.id());
@@ -245,6 +258,50 @@ impl V2rayRef {
         log::debug!("tcp ping {} nodes takes {:?}", size, perform_duration);
         res
     }
+}
+
+async fn get_config_ssh(username: &str, host: &str, path: &str) -> Result<String> {
+    let sh_cmd = format!("scp {}@{}:{} /dev/stdout | sed '$d'", username, host, path);
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(&sh_cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .output()
+        .await?;
+    let content = String::from_utf8(out.stdout)?;
+    log::trace!("get ssh config output: {}", content);
+    Ok(content)
+}
+
+async fn restart_in_ssh_background(config: &str, username: &str, host: &str) -> Result<()> {
+    // 0. clean v2ray env on ssh host
+    let sh_cmd = format!(
+        "
+    ps | grep v2ray | grep -v grep > /dev/null && killall -9 v2ray && echo 'killed v2ray'; 
+    echo '{}' | nohup v2ray -config stdin: &> /dev/null &",
+        config
+    );
+    log::debug!("restarting v2ray with ssh command: {}", sh_cmd);
+    // 1. start v2ray
+    let mut cmd = tokio::process::Command::new("ssh")
+        .arg(&format!("{}@{}", username, host))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    {
+        cmd.stdin
+            .take()
+            .unwrap()
+            .write_all(sh_cmd.as_bytes())
+            .await?;
+    }
+    let out = cmd.wait_with_output().await?;
+    log::debug!(
+        "start v2ray ssh output: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    Ok(())
 }
 
 fn find_bin_path(name: &str) -> Result<String> {
@@ -432,6 +489,19 @@ mod tests {
             log::debug!("{:?}", ps);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn get_config_ssh_test() -> Result<()> {
+        let (username, host, path) = (
+            "root",
+            "openwrt",
+            "/var/etc/ssrplus/tcp-only-ssr-retcp.json",
+        );
+        let config = get_config_ssh(username, host, path).await?;
+        assert!(config.contains(r#""port": 1234"#));
+        assert!(!config.contains(path));
+        Ok(())
     }
 
     #[tokio::test]
