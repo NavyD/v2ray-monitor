@@ -107,7 +107,7 @@ where
                 interval
             }
             Err(e) => {
-                log::warn!(
+                log::error!(
                     "use max retry interval {:?} for loop failed: {}",
                     max_retry_interval,
                     e

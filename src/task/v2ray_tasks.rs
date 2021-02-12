@@ -183,7 +183,7 @@ impl V2rayTask {
                             if let Err(e) =
                                 switch_v2ray_ssh(node_stats.clone(), &filter_prop, &ssh_prop).await
                             {
-                                log::warn!("switch v2ray failed: {}", e);
+                                log::error!("switch v2ray failed: {}", e);
                             }
                             continue;
                         } else {

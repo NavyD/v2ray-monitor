@@ -59,9 +59,7 @@ impl Default for AutoTcpPingProperty {
         Self {
             ping_interval: Duration::from_secs(60 * 10),
             retry_failed: Default::default(),
-            filter: FilterProperty {
-                name_regex: None,
-            }
+            filter: FilterProperty { name_regex: None },
         }
     }
 }
@@ -91,7 +89,7 @@ impl Default for SwitchProperty {
             filter: SwitchFilterProperty {
                 lb_nodes_size: 3,
                 name_regex: None,
-            }
+            },
         }
     }
 }

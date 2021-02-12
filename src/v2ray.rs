@@ -12,7 +12,7 @@ use crate::config::*;
 use crate::node::Node;
 use crate::task::v2ray_task_config::*;
 
-use anyhow::{Error, Result};
+use anyhow::Result;
 
 use reqwest::Proxy;
 use tokio::{
@@ -194,9 +194,8 @@ impl V2rayRef {
         ping_property: &PingProperty,
     ) -> Vec<(Node, TcpPingStatistic)> {
         let size = nodes.len();
+        log::debug!("starting tcp ping {} nodes", size);
         let mut res = vec![];
-        log::debug!("start tcp ping {} nodes", size);
-
         let (tx, mut rx) = channel(1);
         let semaphore = Arc::new(Semaphore::new(self.concurr_num));
         let start = Instant::now();
@@ -350,12 +349,12 @@ async fn start(bin_path: &str, config: &str) -> Result<Child> {
     let out = child.stdout.as_mut().expect("not found child stdout");
     let mut reader = BufReader::new(out).lines();
     while let Some(line) = reader.next_line().await? {
-        log::debug!("v2ray stdout line: {}", line);
+        log::trace!("v2ray stdout line: {}", line);
         if line.contains("started") && line.contains("v2ray.com/core: V2Ray") {
             break;
         }
     }
-    log::debug!("v2ray start successful");
+    log::trace!("v2ray start successful");
     Ok(child)
 }
 
@@ -414,7 +413,7 @@ async fn tcp_ping(
 
     drop(tx);
 
-    log::debug!("waiting for measure duration {} tasks", count);
+    log::trace!("waiting for measure duration {} tasks", count);
     while let Some((i, du)) = rx.recv().await {
         log::trace!("received task result: ({}, {:?})", i, du);
         durations[i as usize] = du;

@@ -1,6 +1,6 @@
-use std::{time::Duration};
+use std::time::Duration;
 
-
+use env_logger::Env;
 use task::v2ray_task_config::*;
 use task::v2ray_tasks::V2rayTask;
 use tokio::{fs::read_to_string, time::sleep};
@@ -12,19 +12,14 @@ mod v2ray;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+    env_logger::Builder::from_env(Env::default().default_filter_or("debug"))
         .filter_module("reqwest", log::LevelFilter::Info)
         .init();
     let contents = read_to_string("config.yaml").await?;
     let config: V2rayTaskProperty = serde_yaml::from_str(&contents)?;
     let v2 = V2rayTask::new(config);
-    // let v2 = V2rayTask::with_default();
-    // v2..node_name_regex = Some("→香港02".to_owned());
     v2.run().await?;
-    // let v = V2ray::new(Default::default());
-    // v.restart_load_balance(&[]).await?;
     loop {
-        sleep(Duration::from_secs(30)).await;
+        sleep(Duration::from_secs(60 * 60 * 24)).await;
     }
 }
