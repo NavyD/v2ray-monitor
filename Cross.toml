@@ -1,5 +1,5 @@
-# [target.aarch64-unknown-linux-gnu]
-# image = "navyd/aarch64:first"
+[target.aarch64-unknown-linux-gnu]
+image = "navyd/aarch64:first"
 
-[target.aarch64-unknown-linux-musl]
-image = "navyd/aarch64:sec"
+# [target.aarch64-unknown-linux-musl]
+# image = "navyd/aarch64:sec"

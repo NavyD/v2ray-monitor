@@ -48,18 +48,20 @@ impl Default for SubscriptionProperty {
     }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AutoTcpPingProperty {
+pub struct TcpPingProperty {
     pub ping_interval: Duration,
     pub filter: FilterProperty,
     pub retry_failed: RetryProperty,
+    pub ping: PingProperty,
 }
 
-impl Default for AutoTcpPingProperty {
+impl Default for TcpPingProperty {
     fn default() -> Self {
         Self {
             ping_interval: Duration::from_secs(60 * 10),
             retry_failed: Default::default(),
             filter: FilterProperty { name_regex: None },
+            ping: PingProperty::default(),
         }
     }
 }
@@ -163,11 +165,10 @@ impl Default for PingProperty {
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct V2rayTaskProperty {
-    pub auto_ping: AutoTcpPingProperty,
+    pub tcp_ping: TcpPingProperty,
     pub subscpt: SubscriptionProperty,
     pub switch: SwitchProperty,
     pub v2: V2rayProperty,
-    pub ping: PingProperty,
 }
 
 #[cfg(test)]
