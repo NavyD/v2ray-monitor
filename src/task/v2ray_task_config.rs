@@ -1,18 +1,10 @@
-use std::{fmt::Debug, ops::Deref, time::Duration};
+use std::{fmt::Debug, time::Duration};
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FilterProperty {
-    pub node_name_regex: Option<String>,
-}
-
-impl Default for FilterProperty {
-    fn default() -> Self {
-        Self {
-            node_name_regex: None,
-        }
-    }
+    pub name_regex: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Copy)]
@@ -58,6 +50,7 @@ impl Default for SubscriptionProperty {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AutoTcpPingProperty {
     pub ping_interval: Duration,
+    pub filter: FilterProperty,
     pub retry_failed: RetryProperty,
 }
 
@@ -66,16 +59,26 @@ impl Default for AutoTcpPingProperty {
         Self {
             ping_interval: Duration::from_secs(60 * 10),
             retry_failed: Default::default(),
+            filter: FilterProperty {
+                name_regex: None,
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SwitchFilterProperty {
+    pub lb_nodes_size: u8,
+    pub name_regex: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SwitchProperty {
     pub check_url: String,
     pub check_timeout: Duration,
-    pub lb_nodes_size: u8,
     pub retry: RetryProperty,
+    pub filter: SwitchFilterProperty,
+    pub ssh: V2raySshProperty,
 }
 
 impl Default for SwitchProperty {
@@ -83,8 +86,12 @@ impl Default for SwitchProperty {
         Self {
             check_url: "https://www.google.com/gen_204".to_owned(),
             check_timeout: Duration::from_secs(3),
-            lb_nodes_size: 3,
             retry: Default::default(),
+            ssh: Default::default(),
+            filter: SwitchFilterProperty {
+                lb_nodes_size: 3,
+                name_regex: None,
+            }
         }
     }
 }
@@ -95,10 +102,31 @@ pub struct V2rayProperty {
     pub config_path: Option<String>,
     pub concurr_num: Option<usize>,
     pub port: Option<u16>,
+}
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct V2raySshProperty {
+    pub bin_path: Option<String>,
     pub username: String,
     pub host: String,
-    pub ssh_config_path: String,
+    pub config_path: String,
+}
+
+impl Default for V2raySshProperty {
+    /// 设置bin path为PATH中的v2ra，，config置为Non，，concurr_num
+    /// 设为cpu_nums
+    ///
+    /// # panic
+    ///
+    /// 如果未在PATH中找到v2ray
+    fn default() -> Self {
+        Self {
+            bin_path: None,
+            username: "root".to_string(),
+            host: "openwrt".to_string(),
+            config_path: "/var/etc/ssrplus/tcp-only-ssr-retcp.json".to_string(),
+        }
+    }
 }
 
 impl Default for V2rayProperty {
@@ -114,9 +142,6 @@ impl Default for V2rayProperty {
             config_path: None,
             concurr_num: Some(num_cpus::get() * 2),
             port: Some(1080),
-            username: "root".to_string(),
-            host: "openwrt".to_string(),
-            ssh_config_path: "/var/etc/ssrplus/tcp-only-ssr-retcp.json".to_string(),
         }
     }
 }
@@ -145,7 +170,6 @@ pub struct V2rayTaskProperty {
     pub switch: SwitchProperty,
     pub v2: V2rayProperty,
     pub ping: PingProperty,
-    pub filter: FilterProperty,
 }
 
 #[cfg(test)]
@@ -155,7 +179,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_name() -> anyhow::Result<()> {
+    fn read_config_yaml() -> anyhow::Result<()> {
         let content = read_to_string("config.yaml")?;
         let property: V2rayTaskProperty = serde_yaml::from_str(&content)?;
         log::debug!("property: {:?}", property);

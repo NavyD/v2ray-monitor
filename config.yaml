@@ -1,7 +1,9 @@
 auto_ping:
   ping_interval:
-    secs: 10
+    secs: 600
     nanos: 10
+  filter:
+    node_name_regex: ""
   retry_failed:
     count: 3
     min_interval:
@@ -29,25 +31,28 @@ switch:
   check_timeout:
     secs: 2
     nanos: 0
-  lb_nodes_size: 3
+  filter: 
+    lb_nodes_size: 3
+    name_regex: "香港"
   retry:
-    count: 3
+    count: 7
     min_interval:
-      secs: 2
-      nanos: 0
+      secs: 0
+      nanos: 100000000
     max_interval:
-      secs: 30
+      secs: 40
       nanos: 0
-
+  ssh:
+    username: root
+    host: openwrt
+    config_path: "/var/etc/ssrplus/tcp-only-ssr-retcp.json"
 v2:
   config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
-  concurr_num: 2
+  # concurr_num: 20
 
 ping:
   count: 3
   ping_url: https://www.google.com/gen_204
   timeout:
-    secs: 2
-    nanos: 0
-filter:
-  node_name_regex: "→香港01"
+    secs: 1
+    nanos: 500000

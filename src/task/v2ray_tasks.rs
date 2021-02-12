@@ -14,7 +14,7 @@ use reqwest::Proxy;
 
 use tokio::{
     fs::{write, File},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::sleep,
 };
 
@@ -105,7 +105,7 @@ impl V2rayTask {
 
         let path = &self.property.subscpt.path;
         log::debug!("loading nodes from path: {}", path);
-        let name_regex = if let Some(r) = &self.property.filter.node_name_regex {
+        let name_regex = if let Some(r) = &self.property.auto_ping.filter.name_regex {
             Some(Regex::new(r)?)
         } else {
             None
@@ -136,21 +136,19 @@ impl V2rayTask {
             self.property.switch.retry.min_interval,
             self.property.switch.retry.max_interval,
         );
-        let selected_size = self.property.switch.lb_nodes_size as usize;
+        let filter_prop = self.property.switch.filter.clone();
         let node_stats = self.node_stats.clone();
-        let v2 = self.v2.clone();
-
-        let proxy: Option<String> = self
-            .property
-            .v2
-            .port
-            .as_ref()
-            .map(|p| "socks5://127.0.0.1:".to_string() + &p.to_string());
+        let ssh_prop = self.property.switch.ssh.clone();
+        // let proxy: Option<String> = self
+        //     .property
+        //     .v2
+        //     .port
+        //     .as_ref()
+        //     .map(|p| "socks5://127.0.0.1:".to_string() + &p.to_string());
 
         tokio::spawn(async move {
             let check_url = check_url.to_owned();
-            let task =
-                Arc::new(move || check_networking_owned(check_url.clone(), timeout, proxy.clone()));
+            let task = Arc::new(move || check_networking_owned(check_url.clone(), timeout, None));
 
             let mut last_checked = false;
             let mut max_retries = max_retries_failed;
@@ -183,7 +181,7 @@ impl V2rayTask {
                         if !last_checked {
                             log::debug!("switching nodes");
                             if let Err(e) =
-                                switch_v2ray(node_stats.clone(), selected_size, &v2).await
+                                switch_v2ray_ssh(node_stats.clone(), &filter_prop, &ssh_prop).await
                             {
                                 log::warn!("switch v2ray failed: {}", e);
                             }
@@ -277,6 +275,86 @@ async fn switch_v2ray(
     Ok(())
 }
 
+fn switch_filter(
+    node_stats: MutexGuard<Vec<(Node, TcpPingStatistic)>>,
+    filter_prop: &SwitchFilterProperty,
+) -> Result<Vec<Node>> {
+    if node_stats.iter().all(|(_, ps)| !ps.is_accessible()) {
+        return Err(anyhow!(
+            "not found any available on {} nodes. please update ping statistics",
+            node_stats.len(),
+        ));
+    }
+
+    let nodes = if let Some(re) = filter_prop.name_regex.as_ref() {
+        let re = Regex::new(re).expect("regex error");
+        node_stats
+            .iter()
+            .filter(|(node, _)| {
+                node.remark.is_some() && re.is_match(node.remark.as_deref().unwrap())
+            })
+            .collect()
+    } else {
+        node_stats.iter().collect::<Vec<_>>()
+    };
+    if nodes.is_empty() {
+        return Err(anyhow!(
+            "empty nodes is filtered by name regex: {:?}",
+            filter_prop.name_regex
+        ));
+    }
+
+    let selected_size = filter_prop.lb_nodes_size as usize;
+    if selected_size == 0 {
+        return Err(anyhow!("invalid lb_nodes_size: 0"));
+    }
+    let nodes = if nodes.len() < selected_size {
+        &nodes
+    } else {
+        &nodes[..selected_size]
+    };
+
+    let first_host = nodes.first().unwrap().0.host.as_ref();
+    let diff_hosts = nodes
+        .iter()
+        .map(|(node, _)| (node.remark.as_ref(), node.host.as_ref()))
+        .filter(|(_, host)| first_host != *host)
+        .collect::<Vec<_>>();
+    let nodes = if !diff_hosts.is_empty() {
+        log::info!(
+            "select only the first one host: {}, Find {} nodes with different hosts: {:?}",
+            first_host.unwrap(),
+            diff_hosts.len(),
+            diff_hosts
+        );
+        vec![nodes.first().unwrap().0.clone()]
+    } else {
+        if log::log_enabled!(log::Level::Info) {
+            let nodes = nodes
+                .iter()
+                .map(|(n, ps)| (n.remark.as_deref(), ps))
+                .collect::<Vec<_>>();
+            log::info!("switching with selected nodes: {:?}", nodes);
+        }
+        nodes
+            .iter()
+            .map(|(node, _)| node.clone())
+            .collect::<Vec<_>>()
+    };
+
+    Ok(nodes)
+}
+
+async fn switch_v2ray_ssh(
+    node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
+    filter_prop: &SwitchFilterProperty,
+    ssh_prop: &V2raySshProperty,
+) -> Result<()> {
+    let nodes = switch_filter(node_stats.lock().await, &filter_prop)?;
+    restart_ssh_load_balance(&nodes.iter().collect::<Vec<_>>(), ssh_prop).await?;
+    Ok(())
+}
+
 async fn check_networking_owned(
     url: String,
     timeout: Duration,
@@ -347,18 +425,18 @@ async fn update_tcp_ping_stats(
     let old_size = nodes.len();
 
     let mut stats = v2.tcp_ping_nodes(nodes, &pp).await;
+
     log::debug!("tcp ping completed with {} size", stats.len());
-    if stats.len() != old_size {
-        panic!(
-            "wrong node len: {} after tcp ping len: {}",
-            stats.len(),
-            old_size
-        );
+    if stats.is_empty() {
+        panic!("empty nodes after tcp ping");
+    } else if stats.len() < old_size {
+        log::warn!("tcp ping nodes reduced {}", old_size - stats.len());
     }
 
     stats.sort_unstable_by(|(_, a), (_, b)| a.cmp(&b));
 
     if !stats[0].1.is_accessible() {
+        log::error!("not found any accessible node in {} nodes", stats.len());
         return Err(anyhow!(
             "no any node is accessible: first: {:?}, last: {:?}",
             stats.first().unwrap(),
@@ -387,8 +465,8 @@ mod tests {
     #[tokio::test]
     async fn load_nodes_name_filter() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.property.filter = FilterProperty {
-            node_name_regex: Some("安徽→香港01".to_owned()),
+        task.property.auto_ping.filter = FilterProperty {
+            name_regex: Some("安徽→香港01".to_owned()),
         };
         task.load_nodes().await?;
         let stats = task.node_stats.lock().await;
@@ -399,8 +477,8 @@ mod tests {
     #[tokio::test]
     async fn ping_task_test() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.property.filter = FilterProperty {
-            node_name_regex: Some("安徽→香港01".to_owned()),
+        task.property.auto_ping.filter = FilterProperty {
+            name_regex: Some("安徽→香港01".to_owned()),
         };
         task.load_nodes().await?;
         assert_eq!(task.node_stats.lock().await.len(), 1);
@@ -424,8 +502,8 @@ mod tests {
     #[tokio::test]
     async fn ping_task_error_when_unavailable_address() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.property.filter = FilterProperty {
-            node_name_regex: Some("安徽→香港01".to_owned()),
+        task.property.auto_ping.filter = FilterProperty {
+            name_regex: Some("安徽→香港01".to_owned()),
         };
         task.load_nodes().await?;
 
@@ -465,9 +543,9 @@ mod tests {
     #[tokio::test]
     async fn switch_v2ray_test() -> Result<()> {
         let mut task = V2rayTask::with_default();
-        task.property.filter = FilterProperty {
+        task.property.auto_ping.filter = FilterProperty {
             // node_name_regex: Some("安徽→香港01".to_owned()),
-            node_name_regex: Some("香港01".to_owned()),
+            name_regex: Some("香港HKBN01".to_owned()),
         };
         let sp = task.property.switch.clone();
         // task.vp;
@@ -491,6 +569,36 @@ mod tests {
     }
 
     // #[tokio::test]
+    // async fn switch_v2ray_ssh_test() -> Result<()> {
+    //     let mut task = V2rayTask::with_default();
+    //     task.property.filter = FilterProperty {
+    //         // node_name_regex: Some("安徽→香港01".to_owned()),
+    //         node_name_regex: Some("香港HKBN01".to_owned()),
+    //     };
+    //     let sp = task.property.switch.clone();
+    //     // task.vp;
+    //     task.load_nodes().await?;
+
+    //     update_tcp_ping_stats(
+    //         task.node_stats.clone(),
+    //         task.v2.clone(),
+    //         &task.property.ping,
+    //     )
+    //     .await?;
+
+    //     switch_v2ray_ssh(task.node_stats, 3, &task.property.switch.ssh).await?;
+
+    //     sleep(Duration::from_millis(1200)).await;
+    //     check_networking(
+    //         &sp.check_url,
+    //         sp.check_timeout,
+    //         None,
+    //     )
+    //     .await?;
+    //     Ok(())
+    // }
+
+    // #[tokio::test]
     // async fn auto_update_subscription() -> Result<()> {
     //     let mut task = V2rayTask::with_default();
     //     task.property.subscpt.update_interval = Duration::from_secs(3);
@@ -505,8 +613,8 @@ mod tests {
     // async fn auto_swith_test() -> Result<()> {
     //     let mut task = V2rayTask::with_default();
     //     task.property.filter = FilterProperty {
-    //         node_name_regex: Some("安徽→香港01".to_owned()),
-    //         // node_name_regex: Some("香港01".to_owned()),
+    //         // node_name_regex: Some("安徽→香港01".to_owned()),
+    //         node_name_regex: Some("粤港03 IEPL专线 入口5".to_owned()),
     //     };
     //     task.load_nodes().await?;
 
@@ -516,7 +624,7 @@ mod tests {
     //         &task.property.ping,
     //     )
     //     .await?;
-
+    //     log::debug!("test");
     //     task.auto_swith().await;
     //     sleep(Duration::from_secs(150)).await;
     //     Ok(())

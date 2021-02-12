@@ -1,6 +1,15 @@
 use crate::node::Node;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("unsupported config expected: {0}, found: {1}")]
+    Unsupported(String, String),
+    #[error("invalid config: {0}")]
+    Invalid(String),
+}
 
 /// 应用nodes生成v2ray配置
 ///
@@ -43,7 +52,7 @@ pub fn apply_config(contents: &str, nodes: &[&Node], local_port: Option<u16>) ->
 
     apply(
         &mut contents,
-        "outbound.streamSettings.wsSettings.headers.host",
+        "outbound.streamSettings.wsSettings.headers.Host",
         json!(node.host.as_ref().expect("not found host")),
     )?;
 
@@ -62,6 +71,24 @@ fn get_mut<'a>(contents: &'a mut Value, path: &str) -> Result<&'a mut Value> {
         .fold(Some(contents), |val, key| val.and_then(|v| v.get_mut(key)))
         .ok_or_else(|| anyhow!("read config error: {}", path))
 }
+// fn get_mut1<'a>(contents: &'a mut Value, path: &str) -> Result<&'a mut Value> {
+//     path.split('.')
+//         .fold(Some(contents), |val, key| {
+//             val.and_then(|v| {
+//                 // v.as_object_mut().map(|o| {
+//                 //     o.iter_mut()
+//                 //         .find(|(name, _)| name.to_ascii_lowercase() == key)
+//                 //         .map(|(_, v)| v)
+//                 // });
+//                 if let Some(v) = v.get_mut(key) {
+//                     return Some(v);
+//                 }
+//                 let a = v.clone();
+//                 todo!()
+//             })
+//         })
+//         .ok_or_else(|| anyhow!("read config error: {}", path))
+// }
 
 /// 使用path .分离出key找出对应的value并重置为new_val
 fn apply(contents: &mut Value, path: &str, new_val: Value) -> Result<()> {
@@ -73,22 +100,26 @@ fn apply(contents: &mut Value, path: &str, new_val: Value) -> Result<()> {
 }
 
 /// 检查nodes是否符合配置要求
-fn check_load_balance_nodes(nodes: &[&Node]) -> Result<()> {
+fn check_load_balance_nodes(nodes: &[&Node]) -> std::result::Result<(), ConfigError> {
     if nodes.is_empty() {
-        return Err(anyhow!("empty nodes"));
+        return Err(ConfigError::Invalid("empty nodes".to_string()));
     }
     // check nodes
-    let host = nodes[0].host.as_deref();
+    let first_host = nodes.first().unwrap().host.as_deref();
     for node in nodes {
         // check node net type
-        if !(node.net.as_deref() == Some("ws") && node.host.as_deref() == host) {
-            log::error!(
-                "filtered unsupported node: {:?}. by net type: {:?}, or host: {:?}",
-                node.remark,
-                node.net,
-                node.host
-            );
-            return Err(anyhow!("unsupported config node: {:?}", node));
+        if node.net.as_deref() != Some("ws") {
+            return Err(ConfigError::Unsupported(
+                "ws".to_string(),
+                format!("{:?}", node.net),
+            ));
+        }
+        // check multiple nodes host
+        if node.host.as_deref() != first_host {
+            return Err(ConfigError::Invalid(format!(
+                "first host: {:?} inconsistent name -> host: {:?} -> {:?}",
+                first_host, node.remark, node.host
+            )));
         }
     }
     Ok(())
@@ -134,7 +165,7 @@ pub fn gen_load_balance_config(nodes: &[&Node], local_port: u16) -> Result<Strin
             "streamSettings": {
                 "wsSettings": {
                     "headers": {
-                        "host": "hk02.az.jinkela.icu"
+                        "Host": "hk02.az.jinkela.icu"
                     },
                     "path": "/hls"
                 },
@@ -253,7 +284,7 @@ mod tests {
 
     fn check_ws_sets(ws: &Value, node: &Node) {
         assert_eq!(ws["path"].as_str(), node.path.as_deref());
-        assert_eq!(ws["headers"]["host"].as_str(), node.host.as_deref());
+        assert_eq!(ws["headers"]["Host"].as_str(), node.host.as_deref());
     }
 
     fn get_config_string() -> String {
@@ -298,7 +329,7 @@ mod tests {
                     "wsSettings": {
                         "path": "/hls",
                         "headers": {
-                            "host": "hkt01.pqs-vds.lay168.net"
+                            "Host": "hkt01.pqs-vds.lay168.net"
                         }
                     },
                     "network": "ws"

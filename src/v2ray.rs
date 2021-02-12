@@ -12,7 +12,7 @@ use crate::config::*;
 use crate::node::Node;
 use crate::task::v2ray_task_config::*;
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 
 use reqwest::Proxy;
 use tokio::{
@@ -157,19 +157,6 @@ impl V2rayRef {
         }
     }
 
-    pub async fn restart_ssh_load_balance(&self, nodes: &[&Node]) -> Result<()> {
-        // get old config
-        let config = get_config_ssh(
-            &self.property.username,
-            &self.property.host,
-            &self.property.ssh_config_path,
-        )
-        .await?;
-        let config = apply_config(&config, nodes, None)?;
-        // start
-        restart_in_ssh_background(&config, &self.property.username, &self.property.host).await
-    }
-
     pub async fn restart_load_balance(&self, nodes: &[&Node]) -> Result<()> {
         if let Some(mut child) = self.v2_child.lock().await.take() {
             log::debug!("killing old v2ray proccess: {:?}", child.id());
@@ -225,28 +212,20 @@ impl V2rayRef {
 
             tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                let config = gen_tcp_ping_config(&node, port).unwrap_or_else(|e| {
-                    panic!(
-                        "generate tcp ping config error: {}, with node: {:?}",
-                        e, node
-                    )
-                });
-                let ps = tcp_ping(&bin_path, &config, port, &pp).await;
-                log::debug!(
-                    "got tcp ping statistic. node: {:?}, ps: {:?}",
-                    node.remark,
-                    ps
-                );
+                let ps = match gen_tcp_ping_config(&node, port) {
+                    Ok(config) => tcp_ping(&bin_path, &config, port, &pp).await,
+                    Err(e) => Err(e),
+                };
                 tx.send((node, ps)).await.unwrap();
             });
         }
 
-        // drop(tx);
+        drop(tx);
 
         while let Some((node, ps)) = rx.recv().await {
             if let Err(e) = ps {
-                log::info!(
-                    "received error tcp ping node: {:?}, ping statistic: {}",
+                log::warn!(
+                    "ignored node: {:?}, for received error tcp ping: {}",
                     node.remark,
                     e
                 );
@@ -260,15 +239,18 @@ impl V2rayRef {
     }
 }
 
+pub async fn restart_ssh_load_balance(nodes: &[&Node], ssh_prop: &V2raySshProperty) -> Result<()> {
+    // get old config
+    let config = get_config_ssh(&ssh_prop.username, &ssh_prop.host, &ssh_prop.config_path).await?;
+    let config = apply_config(&config, nodes, None)?;
+    // start
+    restart_in_ssh_background(&config, &ssh_prop.username, &ssh_prop.host).await
+}
+
 async fn get_config_ssh(username: &str, host: &str, path: &str) -> Result<String> {
-    let sh_cmd = format!("scp {}@{}:{} /dev/stdout | sed '$d'", username, host, path);
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(&sh_cmd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .output()
-        .await?;
+    let sh_cmd = format!("scp {}@{}:{} /dev/stdout", username, host, path);
+    log::debug!("loading config from ssh command: {}", sh_cmd);
+    let out = Command::new("sh").arg("-c").arg(&sh_cmd).output().await?;
     let content = String::from_utf8(out.stdout)?;
     log::trace!("get ssh config output: {}", content);
     Ok(content)
@@ -492,6 +474,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_in_ssh_background_test() -> Result<()> {
+        async fn get_v2ray_out(username: &str, host: &str) -> Result<Option<String>> {
+            let cmd = format!("{}@{}", username, host);
+            let out = Command::new("ssh")
+                .arg(&cmd)
+                .arg("ps | grep v2ray | grep -v grep")
+                .stdout(Stdio::piped())
+                .output()
+                .await?;
+            log::debug!("error: {}", String::from_utf8_lossy(&out.stderr));
+            let out = if out.status.success() {
+                Some(String::from_utf8(out.stdout)?)
+            } else {
+                None
+            };
+            Ok(out)
+        }
+        let (username, host) = ("root", "openwrt");
+        let old_out = get_v2ray_out(username, host).await?;
+
+        let node = get_node();
+        let config = gen_tcp_ping_config(&node, 1080)?;
+        restart_in_ssh_background(&config, username, host).await?;
+
+        let new_out = get_v2ray_out(username, host).await?;
+        assert_ne!(new_out, old_out);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn get_config_ssh_test() -> Result<()> {
         let (username, host, path) = (
             "root",
@@ -501,6 +513,21 @@ mod tests {
         let config = get_config_ssh(username, host, path).await?;
         assert!(config.contains(r#""port": 1234"#));
         assert!(!config.contains(path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_config_ssh_parse_test() -> Result<()> {
+        let (username, host, path) = (
+            "root",
+            "openwrt",
+            "/var/etc/ssrplus/tcp-only-ssr-retcp.json",
+        );
+        let node = get_node();
+        let config = get_config_ssh(username, host, path).await?;
+
+        let config = apply_config(&config, &[&node], None)?;
+        assert!(config.contains(&node.add.unwrap()));
         Ok(())
     }
 
