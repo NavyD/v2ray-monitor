@@ -6,6 +6,7 @@ use std::{
 
 pub mod v2ray_task_config;
 pub mod v2ray_tasks;
+pub mod filter;
 
 use anyhow::{anyhow, Result};
 use futures::Future;

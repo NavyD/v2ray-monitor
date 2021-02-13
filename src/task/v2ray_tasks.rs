@@ -6,8 +6,12 @@ use crate::{
     v2ray::*,
 };
 use anyhow::{anyhow, Result};
+use filter::Filter;
 
-use super::*;
+use super::{
+    filter::{FilterManager, NameRegexFilter},
+    *,
+};
 
 use regex::Regex;
 use reqwest::Proxy;
@@ -23,11 +27,13 @@ pub struct V2rayTask {
     v2: V2ray,
     property: V2rayTaskProperty,
     cur_node_idx: Arc<Mutex<usize>>,
+    ping_filter: FilterManager,
 }
 
 impl V2rayTask {
     pub fn new(property: V2rayTaskProperty) -> Self {
         Self {
+            ping_filter: FilterManager::with_ping(property.tcp_ping.filter.clone()),
             node_stats: Arc::new(Mutex::new(vec![])),
             v2: V2ray::new(property.v2.clone()),
             property,
@@ -41,7 +47,6 @@ impl V2rayTask {
     }
 
     pub async fn run(&self) -> Result<()> {
-        self.load_nodes().await?;
         self.auto_ping();
         self.auto_update_subscription().await?;
         self.auto_swith().await;
@@ -114,41 +119,6 @@ impl V2rayTask {
         Ok(())
     }
 
-    async fn load_nodes(&self) -> Result<()> {
-        const EMPTY_PS: TcpPingStatistic = TcpPingStatistic {
-            durations: vec![],
-            count: 0,
-            received_count: 0,
-            rtt_avg: None,
-            rtt_max: None,
-            rtt_min: None,
-        };
-
-        let path = &self.property.subscpt.path;
-        log::debug!("loading nodes from path: {}", path);
-        let name_regex = if let Some(r) = &self.property.tcp_ping.filter.name_regex {
-            Some(Regex::new(r)?)
-        } else {
-            None
-        };
-
-        let nodes = load_subscription_nodes_from_file(path)
-            .await?
-            .into_iter()
-            // filter by name regex
-            .filter(|node| {
-                name_regex.is_none()
-                    || name_regex
-                        .as_ref()
-                        .unwrap()
-                        .is_match(node.remark.as_ref().unwrap())
-            })
-            .map(|n| (n, EMPTY_PS))
-            .collect::<Vec<_>>();
-        *self.node_stats.lock().await = nodes;
-        Ok(())
-    }
-
     async fn auto_swith(&self) {
         let node_stats = self.node_stats.clone();
         let switch = self.property.switch.clone();
@@ -217,16 +187,42 @@ impl V2rayTask {
     }
 
     /// 不断重复在ping_interval间隔中更新。如果失败时将重复直到成功或达到最大重试次数
-    fn auto_ping(&self) {
+    async fn auto_ping(&self) -> Result<()> {
         let stats_lock = self.node_stats.clone();
         let v2 = self.v2.clone();
         let tcp_ping = self.property.tcp_ping.clone();
         let cur_node_idx = self.cur_node_idx.clone();
+
+        const EMPTY_PS: TcpPingStatistic = TcpPingStatistic {
+            durations: vec![],
+            count: 0,
+            received_count: 0,
+            rtt_avg: None,
+            rtt_max: None,
+            rtt_min: None,
+        };
+
+        let path = &self.property.subscpt.path;
+        log::debug!("loading nodes from path: {}", path);
+        let nodes = load_subscription_nodes_from_file(path)
+            .await?
+            .into_iter()
+            .map(|n| (n, EMPTY_PS))
+            .collect::<Vec<_>>();
+        *self.node_stats.lock().await = nodes;
+        let filter = self.ping_filter.clone();
         tokio::spawn(async move {
             let pp = Arc::new(tcp_ping.ping);
             let retry = tcp_ping.retry_failed;
-            let task =
-                move || update_tcp_ping_stats_owned(stats_lock.clone(), v2.clone(), pp.clone());
+            let filter = filter.clone();
+            let task = move || {
+                update_tcp_ping_stats_owned(
+                    stats_lock.clone(),
+                    v2.clone(),
+                    pp.clone(),
+                    filter.clone(),
+                )
+            };
             loop {
                 match retry_on(
                     task.clone(),
@@ -250,6 +246,7 @@ impl V2rayTask {
                 sleep(tcp_ping.ping_interval).await;
             }
         });
+        Ok(())
     }
 }
 
@@ -436,61 +433,54 @@ async fn update_subscription_owned(url: String, path: String) -> Result<()> {
     update_subscription(&url, &path).await
 }
 
-async fn update_tcp_ping_stats_owned(
-    node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
-    v2: V2ray,
-    pp: Arc<PingProperty>,
-) -> Result<()> {
-    update_tcp_ping_stats(node_stats, v2, pp.as_ref()).await
-}
-
-/// 执行ping任务后通过tcp ping排序应用到node_stats中
+/// tcp ping stats并前后过滤出节点
 ///
 /// # Errors
 ///
-/// * 如果node_stats为空
 /// * 如果ping后没有任何node是可访问的
 ///
 /// # panic
 ///
-/// * 如果tcp ping后数量与node_stats原始数量对不上
-async fn update_tcp_ping_stats(
-    node_stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
+/// * 如果tcp ping后nodes为空 或 被filter过滤为空
+async fn update_tcp_ping_stats_owned(
+    stats: Arc<Mutex<Vec<(Node, TcpPingStatistic)>>>,
     v2: V2ray,
-    pp: &PingProperty,
+    pp: Arc<PingProperty>,
+    fm: FilterManager,
 ) -> Result<()> {
-    let nodes = {
-        let mut stats = node_stats.lock().await;
-        if stats.is_empty() {
-            log::error!("node stats is empty");
-            return Err(anyhow!("node stats is empty, please load nodes"));
-        }
-        stats.drain(..).map(|v| v.0).collect::<Vec<_>>()
-    };
-    let old_size = nodes.len();
+    // 防止过度加锁 移出nodes
+    let node_stats = stats.lock().await.drain(..).collect::<Vec<_>>();
 
-    let mut stats = v2.tcp_ping_nodes(nodes, &pp).await;
+    let node_stats = fm.before_filter(node_stats);
+    let old_size = node_stats.len();
+    let nodes = node_stats.into_iter().map(|(n, _)| n).collect();
+    let node_stats = v2.tcp_ping_nodes(nodes, &pp).await;
+    log::debug!("tcp ping completed with {} size", node_stats.len());
+    let node_stats = fm.after_filter(node_stats);
 
-    log::debug!("tcp ping completed with {} size", stats.len());
-    if stats.is_empty() {
+    if node_stats.is_empty() {
         panic!("empty nodes after tcp ping");
-    } else if stats.len() < old_size {
-        log::warn!("tcp ping nodes reduced {}", old_size - stats.len());
+    } else if node_stats.len() < old_size {
+        log::warn!("tcp ping nodes reduced {}", old_size - node_stats.len());
     }
 
-    stats.sort_unstable_by(|(_, a), (_, b)| a.cmp(&b));
-
-    if !stats.first().unwrap().1.is_accessible() {
-        log::error!("not found any accessible node in {} nodes", stats.len());
+    // 检查是否存在一个成功ping通的节点
+    if node_stats.iter().all(|(_, ps)| !ps.is_accessible()) {
+        log::error!(
+            "no any node is accessible: first: {:?}, last: {:?} in {} nodes",
+            node_stats.first().unwrap(),
+            node_stats.last().unwrap(),
+            node_stats.len()
+        );
         return Err(anyhow!(
-            "no any node is accessible: first: {:?}, last: {:?}",
-            stats.first().unwrap(),
-            stats.last().unwrap()
+            "not found any accessible node in {} nodes",
+            node_stats.len()
         ));
     }
 
+    // 显示最前面的3个元素
     if log::log_enabled!(log::Level::Info) {
-        let nodes = stats
+        let nodes = node_stats
             .iter()
             .map(|(n, ps)| (n.remark.as_ref(), ps.rtt_avg.as_ref()))
             .filter(|(_, rtt)| rtt.is_some())
@@ -505,215 +495,216 @@ async fn update_tcp_ping_stats(
             &nodes[..size]
         );
     }
-    *node_stats.lock().await = stats;
+
+    *stats.lock().await = node_stats;
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
 
-    #[tokio::test]
-    async fn load_nodes_test() -> Result<()> {
-        let task = V2rayTask::with_default();
-        task.load_nodes().await?;
-        let stats = task.node_stats.lock().await;
-        assert!(!stats.is_empty());
-        assert_eq!(stats.len(), 147);
-        Ok(())
-    }
+//     #[tokio::test]
+//     async fn load_nodes_test() -> Result<()> {
+//         let task = V2rayTask::with_default();
+//         task.load_nodes().await?;
+//         let stats = task.node_stats.lock().await;
+//         assert!(!stats.is_empty());
+//         assert_eq!(stats.len(), 147);
+//         Ok(())
+//     }
 
-    #[tokio::test]
-    async fn load_nodes_name_filter() -> Result<()> {
-        let mut task = V2rayTask::with_default();
-        task.property.tcp_ping.filter = FilterProperty {
-            name_regex: Some("安徽→香港01".to_owned()),
-        };
-        task.load_nodes().await?;
-        let stats = task.node_stats.lock().await;
-        assert_eq!(stats.len(), 1);
-        Ok(())
-    }
+//     #[tokio::test]
+//     async fn load_nodes_name_filter() -> Result<()> {
+//         let mut task = V2rayTask::with_default();
+//         task.property.tcp_ping.filter = FilterProperty {
+//             name_regex: Some("安徽→香港01".to_owned()),
+//         };
+//         task.load_nodes().await?;
+//         let stats = task.node_stats.lock().await;
+//         assert_eq!(stats.len(), 1);
+//         Ok(())
+//     }
 
-    #[tokio::test]
-    async fn ping_task_test() -> Result<()> {
-        let mut task = V2rayTask::with_default();
-        task.property.tcp_ping.filter = FilterProperty {
-            name_regex: Some("安徽→香港01".to_owned()),
-        };
-        task.load_nodes().await?;
-        assert_eq!(task.node_stats.lock().await.len(), 1);
+//     #[tokio::test]
+//     async fn ping_task_test() -> Result<()> {
+//         let mut task = V2rayTask::with_default();
+//         task.property.tcp_ping.filter = FilterProperty {
+//             name_regex: Some("安徽→香港01".to_owned()),
+//         };
+//         task.load_nodes().await?;
+//         assert_eq!(task.node_stats.lock().await.len(), 1);
 
-        update_tcp_ping_stats(
-            task.node_stats.clone(),
-            task.v2.clone(),
-            &task.property.tcp_ping.ping,
-        )
-        .await?;
+//         update_tcp_ping_stats(
+//             task.node_stats.clone(),
+//             task.v2.clone(),
+//             &task.property.tcp_ping.ping,
+//         )
+//         .await?;
 
-        assert!(task
-            .node_stats
-            .lock()
-            .await
-            .iter()
-            .any(|(_, ps)| ps.is_accessible()));
-        Ok(())
-    }
+//         assert!(task
+//             .node_stats
+//             .lock()
+//             .await
+//             .iter()
+//             .any(|(_, ps)| ps.is_accessible()));
+//         Ok(())
+//     }
 
-    #[tokio::test]
-    async fn ping_task_error_when_unavailable_address() -> Result<()> {
-        let mut task = V2rayTask::with_default();
-        task.property.tcp_ping.filter = FilterProperty {
-            name_regex: Some("安徽→香港01".to_owned()),
-        };
-        task.load_nodes().await?;
+//     #[tokio::test]
+//     async fn ping_task_error_when_unavailable_address() -> Result<()> {
+//         let mut task = V2rayTask::with_default();
+//         task.property.tcp_ping.filter = FilterProperty {
+//             name_regex: Some("安徽→香港01".to_owned()),
+//         };
+//         task.load_nodes().await?;
 
-        {
-            let mut nodes = task.node_stats.lock().await;
-            assert_eq!(nodes.len(), 1);
-            nodes[0].0.add = Some("non.host.address".to_owned());
-        }
+//         {
+//             let mut nodes = task.node_stats.lock().await;
+//             assert_eq!(nodes.len(), 1);
+//             nodes[0].0.add = Some("non.host.address".to_owned());
+//         }
 
-        let res = update_tcp_ping_stats(
-            task.node_stats.clone(),
-            task.v2.clone(),
-            &task.property.tcp_ping.ping,
-        )
-        .await;
-        assert!(res.is_err());
-        Ok(())
-    }
+//         let res = update_tcp_ping_stats(
+//             task.node_stats.clone(),
+//             task.v2.clone(),
+//             &task.property.tcp_ping.ping,
+//         )
+//         .await;
+//         assert!(res.is_err());
+//         Ok(())
+//     }
 
-    #[tokio::test]
-    async fn update_subscription_test() -> Result<()> {
-        let mut subscpt = SubscriptionProperty::default();
-        let start = Instant::now();
-        subscpt.path = "/tmp/v2ray-subscription.txt".to_owned();
-        update_subscription(&subscpt.url, &subscpt.path).await?;
-        let modified_time = File::open(subscpt.path)
-            .await?
-            .metadata()
-            .await?
-            .modified()?;
-        let elapsed = modified_time.elapsed()?;
-        log::debug!("modified time: {:?}, elapsed: {:?}", modified_time, elapsed);
-        assert!(elapsed < Instant::now() - start);
-        Ok(())
-    }
+//     #[tokio::test]
+//     async fn update_subscription_test() -> Result<()> {
+//         let mut subscpt = SubscriptionProperty::default();
+//         let start = Instant::now();
+//         subscpt.path = "/tmp/v2ray-subscription.txt".to_owned();
+//         update_subscription(&subscpt.url, &subscpt.path).await?;
+//         let modified_time = File::open(subscpt.path)
+//             .await?
+//             .metadata()
+//             .await?
+//             .modified()?;
+//         let elapsed = modified_time.elapsed()?;
+//         log::debug!("modified time: {:?}, elapsed: {:?}", modified_time, elapsed);
+//         assert!(elapsed < Instant::now() - start);
+//         Ok(())
+//     }
 
-    #[tokio::test]
-    async fn switch_v2ray_test() -> Result<()> {
-        let mut task = V2rayTask::with_default();
-        task.property.tcp_ping.filter = FilterProperty {
-            // node_name_regex: Some("安徽→香港01".to_owned()),
-            name_regex: Some("香港HKBN01".to_owned()),
-        };
-        let sp = task.property.switch.clone();
-        // task.vp;
-        task.load_nodes().await?;
+//     #[tokio::test]
+//     async fn switch_v2ray_test() -> Result<()> {
+//         let mut task = V2rayTask::with_default();
+//         task.property.tcp_ping.filter = FilterProperty {
+//             // node_name_regex: Some("安徽→香港01".to_owned()),
+//             name_regex: Some("香港HKBN01".to_owned()),
+//         };
+//         let sp = task.property.switch.clone();
+//         // task.vp;
+//         task.load_nodes().await?;
 
-        update_tcp_ping_stats(
-            task.node_stats.clone(),
-            task.v2.clone(),
-            &task.property.tcp_ping.ping,
-        )
-        .await?;
+//         update_tcp_ping_stats(
+//             task.node_stats.clone(),
+//             task.v2.clone(),
+//             &task.property.tcp_ping.ping,
+//         )
+//         .await?;
 
-        switch_v2ray(task.node_stats, 3, &task.v2).await?;
-        check_networking(
-            &sp.check_url,
-            sp.check_timeout,
-            Some(&("socks5://127.0.0.1:".to_owned() + &task.property.v2.port.unwrap().to_string())),
-        )
-        .await?;
-        Ok(())
-    }
+//         switch_v2ray(task.node_stats, 3, &task.v2).await?;
+//         check_networking(
+//             &sp.check_url,
+//             sp.check_timeout,
+//             Some(&("socks5://127.0.0.1:".to_owned() + &task.property.v2.port.unwrap().to_string())),
+//         )
+//         .await?;
+//         Ok(())
+//     }
 
-    #[tokio::test]
-    async fn switch_v2ray_ssh_test() -> Result<()> {
-        let mut task = V2rayTask::with_default();
-        task.property.tcp_ping.filter = FilterProperty {
-            // node_name_regex: Some("安徽→香港01".to_owned()),
-            name_regex: Some("香港HKBN01".to_owned()),
-        };
-        let sp = task.property.switch.clone();
-        // task.vp;
-        task.load_nodes().await?;
+//     #[tokio::test]
+//     async fn switch_v2ray_ssh_test() -> Result<()> {
+//         let mut task = V2rayTask::with_default();
+//         task.property.tcp_ping.filter = FilterProperty {
+//             // node_name_regex: Some("安徽→香港01".to_owned()),
+//             name_regex: Some("香港HKBN01".to_owned()),
+//         };
+//         let sp = task.property.switch.clone();
+//         // task.vp;
+//         task.load_nodes().await?;
 
-        update_tcp_ping_stats(
-            task.node_stats.clone(),
-            task.v2.clone(),
-            &task.property.tcp_ping.ping,
-        )
-        .await?;
-        switch_v2ray_ssh(
-            task.node_stats,
-            &task.property.switch.filter,
-            &task.property.switch.ssh,
-            task.cur_node_idx.clone(),
-        )
-        .await?;
+//         update_tcp_ping_stats(
+//             task.node_stats.clone(),
+//             task.v2.clone(),
+//             &task.property.tcp_ping.ping,
+//         )
+//         .await?;
+//         switch_v2ray_ssh(
+//             task.node_stats,
+//             &task.property.switch.filter,
+//             &task.property.switch.ssh,
+//             task.cur_node_idx.clone(),
+//         )
+//         .await?;
 
-        sleep(Duration::from_millis(1200)).await;
-        // check_networking(&sp.check_url, sp.check_timeout, None).await?;
-        assert!(*task.cur_node_idx.lock().await > 0);
-        Ok(())
-    }
+//         sleep(Duration::from_millis(1200)).await;
+//         // check_networking(&sp.check_url, sp.check_timeout, None).await?;
+//         assert!(*task.cur_node_idx.lock().await > 0);
+//         Ok(())
+//     }
 
-    // #[tokio::test]
-    // async fn auto_update_subscription() -> Result<()> {
-    //     let mut task = V2rayTask::with_default();
-    //     task.property.subscpt.update_interval = Duration::from_secs(3);
-    //     // mock failure
-    //     // task.subspt_property.url = "test.a.b".to_owned();
-    //     task.auto_update_subscription().await?;
-    //     sleep(Duration::from_secs(10)).await;
-    //     Ok(())
-    // }
+//     // #[tokio::test]
+//     // async fn auto_update_subscription() -> Result<()> {
+//     //     let mut task = V2rayTask::with_default();
+//     //     task.property.subscpt.update_interval = Duration::from_secs(3);
+//     //     // mock failure
+//     //     // task.subspt_property.url = "test.a.b".to_owned();
+//     //     task.auto_update_subscription().await?;
+//     //     sleep(Duration::from_secs(10)).await;
+//     //     Ok(())
+//     // }
 
-    // #[tokio::test]
-    // async fn auto_swith_test() -> Result<()> {
-    //     let mut task = V2rayTask::with_default();
-    //     task.property.filter = FilterProperty {
-    //         // node_name_regex: Some("安徽→香港01".to_owned()),
-    //         node_name_regex: Some("粤港03 IEPL专线 入口5".to_owned()),
-    //     };
-    //     task.load_nodes().await?;
+//     // #[tokio::test]
+//     // async fn auto_swith_test() -> Result<()> {
+//     //     let mut task = V2rayTask::with_default();
+//     //     task.property.filter = FilterProperty {
+//     //         // node_name_regex: Some("安徽→香港01".to_owned()),
+//     //         node_name_regex: Some("粤港03 IEPL专线 入口5".to_owned()),
+//     //     };
+//     //     task.load_nodes().await?;
 
-    //     update_tcp_ping_stats(
-    //         task.node_stats.clone(),
-    //         task.v2.clone(),
-    //         &task.property.ping,
-    //     )
-    //     .await?;
-    //     log::debug!("test");
-    //     task.auto_swith().await;
-    //     sleep(Duration::from_secs(150)).await;
-    //     Ok(())
-    // }
+//     //     update_tcp_ping_stats(
+//     //         task.node_stats.clone(),
+//     //         task.v2.clone(),
+//     //         &task.property.ping,
+//     //     )
+//     //     .await?;
+//     //     log::debug!("test");
+//     //     task.auto_swith().await;
+//     //     sleep(Duration::from_secs(150)).await;
+//     //     Ok(())
+//     // }
 
-    // #[tokio::test]
-    // async fn auto_ping_task_test() -> Result<()> {
-    //     let mut task = V2rayTask::with_default();
+//     // #[tokio::test]
+//     // async fn auto_ping_task_test() -> Result<()> {
+//     //     let mut task = V2rayTask::with_default();
 
-    //     task.property.filter.node_name_regex = Some("安徽→香港01".to_owned());
-    //     task.property.auto_ping.ping_interval = Duration::from_secs(1);
-    //     task.load_nodes().await?;
+//     //     task.property.filter.node_name_regex = Some("安徽→香港01".to_owned());
+//     //     task.property.auto_ping.ping_interval = Duration::from_secs(1);
+//     //     task.load_nodes().await?;
 
-    //     {
-    //         let mut nodes = task.node_stats.lock().await;
-    //         assert_eq!(nodes.len(), 1);
-    //         nodes[0].0.add = Some("non.host.address".to_owned());
-    //     }
+//     //     {
+//     //         let mut nodes = task.node_stats.lock().await;
+//     //         assert_eq!(nodes.len(), 1);
+//     //         nodes[0].0.add = Some("non.host.address".to_owned());
+//     //     }
 
-    //     task.auto_ping();
-    //     sleep(Duration::from_secs(30)).await;
-    //     assert!(task
-    //         .node_stats
-    //         .lock()
-    //         .await
-    //         .iter()
-    //         .any(|(_, ps)| ps.is_accessible()));
-    //     Ok(())
-    // }
-}
+//     //     task.auto_ping();
+//     //     sleep(Duration::from_secs(30)).await;
+//     //     assert!(task
+//     //         .node_stats
+//     //         .lock()
+//     //         .await
+//     //         .iter()
+//     //         .any(|(_, ps)| ps.is_accessible()));
+//     //     Ok(())
+//     // }
+// }

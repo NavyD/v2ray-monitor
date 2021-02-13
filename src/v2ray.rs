@@ -195,6 +195,10 @@ impl V2rayRef {
     ) -> Vec<(Node, TcpPingStatistic)> {
         let size = nodes.len();
         log::debug!("starting tcp ping {} nodes", size);
+        if nodes.is_empty() {
+            return vec![];
+        }
+        
         let mut res = vec![];
         let (tx, mut rx) = channel(1);
         let semaphore = Arc::new(Semaphore::new(self.concurr_num));
