@@ -629,35 +629,36 @@ mod tests {
         Ok(())
     }
 
-    // #[tokio::test]
-    // async fn switch_v2ray_ssh_test() -> Result<()> {
-    //     let mut task = V2rayTask::with_default();
-    //     task.property.filter = FilterProperty {
-    //         // node_name_regex: Some("安徽→香港01".to_owned()),
-    //         node_name_regex: Some("香港HKBN01".to_owned()),
-    //     };
-    //     let sp = task.property.switch.clone();
-    //     // task.vp;
-    //     task.load_nodes().await?;
+    #[tokio::test]
+    async fn switch_v2ray_ssh_test() -> Result<()> {
+        let mut task = V2rayTask::with_default();
+        task.property.tcp_ping.filter = FilterProperty {
+            // node_name_regex: Some("安徽→香港01".to_owned()),
+            name_regex: Some("香港HKBN01".to_owned()),
+        };
+        let sp = task.property.switch.clone();
+        // task.vp;
+        task.load_nodes().await?;
 
-    //     update_tcp_ping_stats(
-    //         task.node_stats.clone(),
-    //         task.v2.clone(),
-    //         &task.property.ping,
-    //     )
-    //     .await?;
+        update_tcp_ping_stats(
+            task.node_stats.clone(),
+            task.v2.clone(),
+            &task.property.tcp_ping.ping,
+        )
+        .await?;
+        switch_v2ray_ssh(
+            task.node_stats,
+            &task.property.switch.filter,
+            &task.property.switch.ssh,
+            task.cur_node_idx.clone(),
+        )
+        .await?;
 
-    //     switch_v2ray_ssh(task.node_stats, 3, &task.property.switch.ssh).await?;
-
-    //     sleep(Duration::from_millis(1200)).await;
-    //     check_networking(
-    //         &sp.check_url,
-    //         sp.check_timeout,
-    //         None,
-    //     )
-    //     .await?;
-    //     Ok(())
-    // }
+        sleep(Duration::from_millis(1200)).await;
+        // check_networking(&sp.check_url, sp.check_timeout, None).await?;
+        assert!(*task.cur_node_idx.lock().await > 0);
+        Ok(())
+    }
 
     // #[tokio::test]
     // async fn auto_update_subscription() -> Result<()> {

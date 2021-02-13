@@ -12,7 +12,7 @@ use crate::config::*;
 use crate::node::Node;
 use crate::task::v2ray_task_config::*;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use reqwest::Proxy;
 use tokio::{
@@ -246,10 +246,21 @@ pub async fn restart_ssh_load_balance(nodes: &[&Node], ssh_prop: &V2raySshProper
     restart_in_ssh_background(&config, &ssh_prop.username, &ssh_prop.host).await
 }
 
+/// 使用scp username@host:path读取配置到内存中
+///
+/// # Errors
+///
+/// 如果命令执行失败
 async fn get_config_ssh(username: &str, host: &str, path: &str) -> Result<String> {
     let sh_cmd = format!("scp {}@{}:{} /dev/stdout", username, host, path);
-    log::debug!("loading config from ssh command: {}", sh_cmd);
-    let out = Command::new("sh").arg("-c").arg(&sh_cmd).output().await?;
+    log::trace!("loading config from ssh command: {}", sh_cmd);
+    let args = sh_cmd.split(' ').collect::<Vec<_>>();
+    let out = Command::new(args[0]).args(&args[1..]).output().await?;
+    if !out.status.success() {
+        let msg = String::from_utf8_lossy(&out.stderr);
+        log::error!("get config from ssh {} error: {}", sh_cmd, msg);
+        return Err(anyhow!("get config ssh error: {}", msg));
+    }
     let content = String::from_utf8(out.stdout)?;
     log::trace!("get ssh config output: {}", content);
     Ok(content)
@@ -257,31 +268,38 @@ async fn get_config_ssh(username: &str, host: &str, path: &str) -> Result<String
 
 async fn restart_in_ssh_background(config: &str, username: &str, host: &str) -> Result<()> {
     // 0. clean v2ray env on ssh host
-    let sh_cmd = format!(
-        "
-    ps | grep v2ray | grep -v grep > /dev/null && killall -9 v2ray && echo 'killed v2ray'; 
-    echo '{}' | nohup v2ray -config stdin: &> /dev/null &",
-        config
-    );
-    log::debug!("restarting v2ray with ssh command: {}", sh_cmd);
+    let sh_cmd = {
+        let kill_ssr_monitor = "ps -ef | grep ssr-monitor | grep -v grep | awk '{print $1}' | xargs kill -9 && echo 'killed ssr-monitor on busbox'";
+        let kill_v2ray = "killall -9 v2ray && echo 'killed v2ray'";
+        format!(
+            "{};{};echo '{}' | nohup v2ray -config stdin: &> /dev/null &",
+            kill_ssr_monitor, kill_v2ray, config
+        )
+    };
+    log::trace!("restarting v2ray with ssh command: {}", sh_cmd);
     // 1. start v2ray
-    let mut cmd = tokio::process::Command::new("ssh")
+    let out = tokio::process::Command::new("ssh")
         .arg(&format!("{}@{}", username, host))
-        .stdin(Stdio::piped())
+        .arg(&sh_cmd)
         .stdout(Stdio::piped())
-        .spawn()?;
-    {
-        cmd.stdin
-            .take()
-            .unwrap()
-            .write_all(sh_cmd.as_bytes())
-            .await?;
+        .output()
+        .await?;
+    if !out.status.success() {
+        let msg = String::from_utf8_lossy(&out.stderr);
+        log::error!(
+            "get config from `ssh {}@{} '{}'` error: {}",
+            username,
+            host,
+            sh_cmd,
+            msg
+        );
+        return Err(anyhow!("get config ssh error: {}", msg));
+    } else {
+        log::trace!(
+            "get ssh config output: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
-    let out = cmd.wait_with_output().await?;
-    log::debug!(
-        "start v2ray ssh output: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
     Ok(())
 }
 
@@ -616,8 +634,8 @@ mod tests {
         INIT.call_once(|| {
             env_logger::builder()
                 .is_test(true)
-                .filter_level(LevelFilter::Debug)
-                .filter_module("reqwest", LevelFilter::Debug)
+                .filter_level(LevelFilter::Info)
+                .filter_module("v2ray_monitor", LevelFilter::Trace)
                 .init();
         });
     }

@@ -50,8 +50,8 @@ switch:
       nanos: 0
   ssh:
     username: root
-    host: openwrt
+    host: 192.168.93.2
     config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
 v2:
   config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
-  concurr_num: 50
+  concurr_num: 20
