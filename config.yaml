@@ -3,13 +3,14 @@ tcp_ping:
     secs: 900
     nanos: 0
   filter:
-    node_name_regex: ""
+    node_name_regex: "test"
   ping:
     count: 3
     ping_url: https://www.google.com/gen_204
     timeout:
       secs: 1
       nanos: 5000000
+    concurr_num: 10
   retry_failed:
     count: 3
     min_interval:
@@ -52,6 +53,6 @@ switch:
     username: root
     host: 192.168.93.2
     config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
-v2:
-  config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
-  concurr_num: 20
+    bin_path: /usr/bin/v2ray
+  local:
+    config_path: /var/etc/ssrplus

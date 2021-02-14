@@ -1,7 +1,8 @@
-use crate::node::Node;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use thiserror::Error;
+
+use super::node::Node;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -21,9 +22,11 @@ pub enum ConfigError {
 /// * node.host不一致时
 /// * node.net不是`ws`类型时
 /// * node关键字段中存在None
-pub fn apply_config(contents: &str, nodes: &[&Node], local_port: Option<u16>) -> Result<String> {
-    let mut contents = serde_json::from_str(contents)?;
-
+pub fn apply_config_value(
+    value: &mut Value,
+    nodes: &[&Node],
+    local_port: Option<u16>,
+) -> Result<String> {
     check_load_balance_nodes(nodes)?;
 
     let vnext = nodes
@@ -41,29 +44,33 @@ pub fn apply_config(contents: &str, nodes: &[&Node], local_port: Option<u16>) ->
             })
         })
         .collect::<Vec<_>>();
-    apply(&mut contents, "outbound.settings.vnext", json!(vnext))?;
+    apply(value, "outbound.settings.vnext", json!(vnext))?;
 
     let node = nodes[0];
     apply(
-        &mut contents,
+        value,
         "outbound.streamSettings.wsSettings.path",
         json!(node.path.as_ref().expect("not found path")),
     )?;
 
     apply(
-        &mut contents,
+        value,
         "outbound.streamSettings.wsSettings.headers.Host",
         json!(node.host.as_ref().expect("not found host")),
     )?;
 
     if let Some(port) = local_port {
-        apply(&mut contents, "inbound.port", json!(port))?;
+        apply(value, "inbound.port", json!(port))?;
     } else {
-        let port = get_mut(&mut contents, "inbound.port")?;
+        let port = get_mut(value, "inbound.port")?;
         log::debug!("use old inbound.port: {}", port);
     }
 
-    Ok(contents.to_string())
+    Ok(value.to_string())
+}
+
+pub fn apply_config(contents: &str, nodes: &[&Node], local_port: Option<u16>) -> Result<String> {
+    apply_config_value(&mut to_value(contents)?, nodes, local_port)
 }
 
 fn get_mut<'a>(contents: &'a mut Value, path: &str) -> Result<&'a mut Value> {
@@ -71,6 +78,20 @@ fn get_mut<'a>(contents: &'a mut Value, path: &str) -> Result<&'a mut Value> {
         .fold(Some(contents), |val, key| val.and_then(|v| v.get_mut(key)))
         .ok_or_else(|| anyhow!("read config error: {}", path))
 }
+
+pub fn to_value(contents: &str) -> Result<Value> {
+    let v = serde_json::from_str(contents)?;
+    Ok(v)
+}
+
+pub fn get_port(contents: &str) -> Result<u16> {
+    let mut value = to_value(contents)?;
+    let port = get_mut(&mut value, "inbound.port")?;
+    port.as_u64()
+        .map(|v| v as u16)
+        .ok_or_else(|| anyhow!("not found port"))
+}
+
 // fn get_mut1<'a>(contents: &'a mut Value, path: &str) -> Result<&'a mut Value> {
 //     path.split('.')
 //         .fold(Some(contents), |val, key| {
@@ -178,6 +199,56 @@ pub fn gen_load_balance_config(nodes: &[&Node], local_port: u16) -> Result<Strin
 
 pub fn gen_tcp_ping_config(node: &Node, local_port: u16) -> Result<String> {
     gen_load_balance_config(&[node], local_port)
+}
+
+pub fn get_tcp_ping_config() -> String {
+    let contents = r#"{
+        "log": {
+            "loglevel": "debug"
+        },
+        "inbound": {
+            "settings": {
+                "ip": "127.0.0.1"
+            },
+            "protocol": "socks",
+            "port": 1080,
+            "sniffing": {
+                "enabled": true,
+                "destOverride": [
+                    "http",
+                    "tls"
+                ]
+            },
+            "listen": "127.0.0.1"
+        },
+        "outbound": {
+            "settings": {
+                "vnext": [
+                    {
+                        "address": "gz01.mobile.lay168.net",
+                        "port": 61022,
+                        "users": [
+                            {
+                                "alterId": 2,
+                                "id": "55fb0457-d874-32c3-89a2-679fed6eabf1"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "protocol": "vmess",
+            "streamSettings": {
+                "wsSettings": {
+                    "headers": {
+                        "Host": "hk02.az.jinkela.icu"
+                    },
+                    "path": "/hls"
+                },
+                "network": "ws"
+            }
+        }
+    }"#;
+    contents.to_string()
 }
 
 #[cfg(test)]

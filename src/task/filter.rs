@@ -1,105 +1,66 @@
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
-use log::warn;
+use super::v2ray_task_config::{SwitchFilterProperty, TcpPingFilterProperty};
+use crate::task::switch::*;
+use crate::tcp_ping::*;
+use crate::v2ray::node::Node;
+use anyhow::anyhow;
+use async_trait::async_trait;
 use regex::Regex;
+use tokio::sync::Mutex;
 
-use crate::{node::Node, v2ray::TcpPingStatistic};
-
-use super::v2ray_task_config::FilterProperty;
-
-pub trait Filter: Send + Sync {
-    fn after_filter(
-        &self,
-        node_stats: Vec<(Node, TcpPingStatistic)>,
-    ) -> Vec<(Node, TcpPingStatistic)> {
-        node_stats
-    }
-
-    fn before_filter(
-        &self,
-        node_stats: Vec<(Node, TcpPingStatistic)>,
-    ) -> Vec<(Node, TcpPingStatistic)> {
-        node_stats
-    }
+#[async_trait]
+pub trait Filter<T, R>: Send + Sync {
+    async fn filter(&self, data: T) -> R;
 
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }
 }
-
 #[derive(Clone)]
-pub struct FilterManager {
-    filters: Arc<Vec<Box<dyn Filter>>>,
+pub struct FilterManager<T, R> {
+    filters: Arc<Vec<Box<dyn Filter<T, R>>>>,
 }
 
-fn register<T: 'static + Filter>(filters: &mut Vec<Box<dyn Filter>>, filter: T) {
-    filters.push(Box::new(filter));
+struct SwitchSelectFilter {
+    size: usize,
 }
 
-impl FilterManager {
-    pub fn new() -> Self {
-        Self {
-            filters: Arc::new(vec![]),
-        }
-    }
-
-    pub fn with_ping(prop: FilterProperty) -> Self {
-        let mut filters = vec![];
-        if let Some(re) = prop.name_regex {
-            register(&mut filters, NameRegexFilter::new(&[re]));
-        }
-        register(&mut filters, PingFilter {});
-        Self {
-            filters: Arc::new(vec![]),
-        }
-    }
-
-    fn filter(
-        &self,
-        mut node_stats: Vec<(Node, TcpPingStatistic)>,
-        bef_or_aft: bool,
-    ) -> Vec<(Node, TcpPingStatistic)> {
-        let old_len = node_stats.len();
-        let msg = if bef_or_aft { "before" } else { "after" };
-        let mut filtered_count = 0;
-        for f in &*self.filters {
-            let old_len = node_stats.len();
-            log::trace!("{} filtering {} elements using {}", msg, old_len, f.name());
-            node_stats = f.after_filter(node_stats);
-
-            if node_stats.is_empty() {
-                log::warn!("{} filters all elements", f.name());
-                break;
+#[async_trait::async_trait]
+impl Filter<SwitchData, Vec<SwitchNodeStat>> for SwitchSelectFilter {
+    async fn filter(&self, data: SwitchData) -> Vec<SwitchNodeStat> {
+        let mut val = data.lock().await;
+        let mut selected = vec![];
+        for _ in 0..self.size {
+            if let Some(v) = val.pop() {
+                selected.push(v);
             }
-
-            let count = old_len - node_stats.len();
-            filtered_count += count;
-            log::trace!("{} {} filtered {} elements", msg, f.name(), count);
         }
-        log::info!(
-            "{} {} elements left, {} filters filter a total of {} elements",
-            msg,
-            node_stats.len() - old_len,
-            self.filters.len(),
-            filtered_count,
+        if self.size == 1 {
+            return selected;
+        }
+
+        let mut max_count = 1;
+        let mut host = selected.first().unwrap().node.host.clone();
+        for ns1 in &selected {
+            let mut count = 0;
+            for ns2 in &selected {
+                if ns1.node.host == ns2.node.host {
+                    count += 1;
+                }
+            }
+            if max_count < count {
+                host = ns1.node.host.clone();
+                max_count = count;
+            }
+        }
+        log::debug!(
+            "selected load balance host: {:?}, count: {}",
+            host,
+            max_count
         );
-        node_stats
-    }
-}
-
-impl Filter for FilterManager {
-    fn after_filter(
-        &self,
-        node_stats: Vec<(Node, TcpPingStatistic)>,
-    ) -> Vec<(Node, TcpPingStatistic)> {
-        self.filter(node_stats, false)
-    }
-
-    fn before_filter(
-        &self,
-        node_stats: Vec<(Node, TcpPingStatistic)>,
-    ) -> Vec<(Node, TcpPingStatistic)> {
-        self.filter(node_stats, true)
+        selected.retain(|e| e.node.host == host);
+        selected
     }
 }
 
@@ -124,52 +85,17 @@ impl NameRegexFilter {
     }
 }
 
-impl Filter for NameRegexFilter {
-    fn before_filter(
-        &self,
-        node_stats: Vec<(Node, TcpPingStatistic)>,
-    ) -> Vec<(Node, TcpPingStatistic)> {
-        node_stats
-            .into_iter()
-            .filter(|(n, _)| {
+#[async_trait]
+impl Filter<SwitchData, ()> for NameRegexFilter {
+    async fn filter(&self, data: SwitchData) {
+        let mut data = data.lock().await;
+        *data = data
+            .drain()
+            .filter(|ns| {
                 self.name_regexs
                     .iter()
-                    .any(|re| re.is_match(n.remark.as_ref().unwrap()))
+                    .any(|re| re.is_match(ns.node.remark.as_ref().unwrap()))
             })
             .collect()
-    }
-}
-
-pub struct PingFilter {}
-
-impl PingFilter {}
-
-impl Filter for PingFilter {
-    fn after_filter(
-        &self,
-        mut node_stats: Vec<(Node, TcpPingStatistic)>,
-    ) -> Vec<(Node, TcpPingStatistic)> {
-        node_stats.sort_unstable_by(|(_, a), (_, b)| a.cmp(&b));
-        node_stats
-    }
-}
-
-pub struct SwitchFilter {}
-
-impl SwitchFilter {}
-
-impl Filter for SwitchFilter {
-    fn after_filter(
-        &self,
-        node_stats: Vec<(Node, TcpPingStatistic)>,
-    ) -> Vec<(Node, TcpPingStatistic)> {
-        todo!()
-    }
-
-    fn before_filter(
-        &self,
-        node_stats: Vec<(Node, TcpPingStatistic)>,
-    ) -> Vec<(Node, TcpPingStatistic)> {
-        todo!()
     }
 }

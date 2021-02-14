@@ -1,6 +1,6 @@
 [package]
 name = "v2ray-monitor"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["navyd <dhjnavyd@gmail.com>"]
 edition = "2018"
 
@@ -27,6 +27,7 @@ regex = "1.4"
 # openssl = { version = "0.9.60", features = ["vendored"] }
 thiserror = "1.0"
 structopt = "0.3"
+async-trait = "0.1"
 
 [dev-dependencies]
 ctor = "0.1"
