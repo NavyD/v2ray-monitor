@@ -5,6 +5,7 @@ use crate::task::v2ray_task_config::*;
 use async_trait::async_trait;
 use futures::executor::block_on;
 use once_cell::sync::OnceCell;
+use parking_lot::Mutex;
 use std::{
     borrow::{Borrow, BorrowMut},
     cmp::Ordering,
@@ -16,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 
 use reqwest::Proxy;
 use tokio::{
@@ -25,7 +26,7 @@ use tokio::{
     net::TcpListener,
     process::{Child, Command},
     runtime::Runtime,
-    sync::{mpsc::channel, Mutex, Semaphore},
+    sync::{mpsc::channel, Semaphore},
 };
 
 use self::node::Node;
@@ -293,7 +294,7 @@ impl V2rayService for LocalV2ray {
     }
 
     async fn start_in_background(&self, config: &str) -> Result<()> {
-        if let Some(old) = self.child.lock().await.as_ref() {
+        if let Some(old) = self.child.lock().as_ref() {
             log::error!(
                 "start another instance in the background. old id: {:?}, new config: {}",
                 old.id(),
@@ -305,12 +306,13 @@ impl V2rayService for LocalV2ray {
             ));
         }
         let child = self.start(config).await?;
-        *self.child.lock().await = Some(child);
+        self.child.lock().replace(child);
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        if let Some(mut child) = self.child.lock().await.take() {
+        let mut child = self.child.lock().take();
+        if let Some(child) = child.as_mut() {
             log::trace!("killing cached v2ray id: {:?}", child.id());
             child.kill().await?;
         }

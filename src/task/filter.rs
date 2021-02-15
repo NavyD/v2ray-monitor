@@ -7,11 +7,9 @@ use crate::v2ray::node::Node;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use regex::Regex;
-use tokio::sync::Mutex;
 
-#[async_trait]
 pub trait Filter<T, R>: Send + Sync {
-    async fn filter(&self, data: T) -> R;
+    fn filter(&self, data: T) -> R;
 
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
@@ -26,10 +24,9 @@ struct SwitchSelectFilter {
     size: usize,
 }
 
-#[async_trait::async_trait]
 impl Filter<SwitchData, Vec<SwitchNodeStat>> for SwitchSelectFilter {
-    async fn filter(&self, data: SwitchData) -> Vec<SwitchNodeStat> {
-        let mut val = data.lock().await;
+    fn filter(&self, data: SwitchData) -> Vec<SwitchNodeStat> {
+        let mut val = data.lock();
         let mut selected = vec![];
         for _ in 0..self.size {
             if let Some(v) = val.pop() {
@@ -85,10 +82,9 @@ impl NameRegexFilter {
     }
 }
 
-#[async_trait]
 impl Filter<SwitchData, ()> for NameRegexFilter {
-    async fn filter(&self, data: SwitchData) {
-        let mut data = data.lock().await;
+    fn filter(&self, data: SwitchData) {
+        let mut data = data.lock();
         *data = data
             .drain()
             .filter(|ns| {

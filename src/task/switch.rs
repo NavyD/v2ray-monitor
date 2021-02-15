@@ -7,8 +7,8 @@ use crate::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use log::trace;
+use parking_lot::Mutex;
 use reqwest::Proxy;
-use tokio::sync::Mutex;
 
 use super::{
     filter::{Filter, *},
@@ -104,11 +104,11 @@ pub struct SwitchTask<V: V2rayService> {
 
 impl<V: V2rayService> SwitchTask<V> {
     pub async fn update_node_stats(&self, node_stats: Vec<(Node, TcpPingStatistic)>) {
-        *self.stats.lock().await = node_stats
+        *self.stats.lock() = node_stats
             .into_iter()
             .map(|(n, ps)| SwitchNodeStat::new(n, ps))
             .collect::<BinaryHeap<_>>();
-        self.pre_filter.filter(self.stats.clone()).await;
+        self.pre_filter.filter(self.stats.clone());
     }
 }
 
@@ -158,7 +158,7 @@ impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
                     all_count += max_retries;
                     if !last_checked {
                         log::debug!("selecting for switching nodes");
-                        let selected = self.select_filter.filter(self.stats.clone()).await;
+                        let selected = self.select_filter.filter(self.stats.clone());
                         if log::log_enabled!(log::Level::Info) {
                             let nodes_msg = selected
                                 .iter()
@@ -166,10 +166,10 @@ impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
                                 .collect::<Vec<_>>();
                             log::info!("selected nodes: {:?}", nodes_msg);
                         }
-                        
+
                         if let Some(last) = last_switched {
                             log::debug!("repush for last switched nodes size: {}", last.len());
-                            let mut stats = self.stats.lock().await;
+                            let mut stats = self.stats.lock();
                             for mut stat in last {
                                 log::trace!("repush node {:?}, old service duration: {:?}, cur switch duration: {:?}", stat.node.remark, stat.serv_duras, last_dura);
                                 stat.push_serv_duration(last_dura.unwrap());
