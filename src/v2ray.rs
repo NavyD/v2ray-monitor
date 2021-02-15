@@ -19,7 +19,14 @@ use std::{
 use anyhow::{anyhow, Result};
 
 use reqwest::Proxy;
-use tokio::{fs::read_to_string, io::*, net::TcpListener, process::{Child, Command}, runtime::Runtime, sync::{mpsc::channel, Mutex, Semaphore}};
+use tokio::{
+    fs::read_to_string,
+    io::*,
+    net::TcpListener,
+    process::{Child, Command},
+    runtime::Runtime,
+    sync::{mpsc::channel, Mutex, Semaphore},
+};
 
 use self::node::Node;
 
@@ -97,29 +104,25 @@ impl ConfigurableV2ray for SshV2ray {
     ///
     /// 如果命令执行失败
     async fn get_config(&self) -> Result<&str> {
-        async fn scp_config(prop: &SshV2rayProperty) -> Result<String> {
-            let sh_cmd = format!(
-                "scp {}@{}:{} /dev/stdout",
-                prop.username, prop.host, prop.config_path
-            );
-            log::trace!("loading config from ssh command: {}", sh_cmd);
-            let args = sh_cmd.split(' ').collect::<Vec<_>>();
-            let out = Command::new(args[0]).args(&args[1..]).output().await?;
-            if !out.status.success() {
-                let msg = String::from_utf8_lossy(&out.stderr);
-                log::error!("get config from ssh {} error: {}", sh_cmd, msg);
-                return Err(anyhow!("get config ssh error: {}", msg));
-            }
-            let content = String::from_utf8(out.stdout)?;
-            log::trace!("get ssh config output: {}", content);
-            Ok(content)
+        if let Some(s) = self.config.get() {
+            return Ok(s);
         }
-        let config = self.config.get_or_try_init(|| {
-            let prop = self.prop.clone();
-            let rt  = Runtime::new().unwrap();
-            rt.block_on(async { scp_config(&prop).await })
-        })?;
-        Ok(config)
+        // scp get content
+        let sh_cmd = format!(
+            "scp {}@{}:{} /dev/stdout",
+            self.prop.username, self.prop.host, self.prop.config_path
+        );
+        log::trace!("loading config from ssh command: {}", sh_cmd);
+        let args = sh_cmd.split(' ').collect::<Vec<_>>();
+        let out = Command::new(args[0]).args(&args[1..]).output().await?;
+        if !out.status.success() {
+            let msg = String::from_utf8_lossy(&out.stderr);
+            log::error!("get config from ssh {} error: {}", sh_cmd, msg);
+            return Err(anyhow!("get config ssh error: {}", msg));
+        }
+        let content = String::from_utf8(out.stdout)?;
+        log::trace!("get ssh config output: {}", content);
+        Ok(self.config.get_or_init(|| content))
     }
 
     async fn apply_config(&self, nodes: &[&Node]) -> Result<String> {
