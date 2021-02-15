@@ -1,4 +1,5 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
+use reqwest::Proxy;
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -79,6 +80,12 @@ fn get_mut<'a>(contents: &'a mut Value, path: &str) -> Result<&'a mut Value> {
         .ok_or_else(|| anyhow!("read config error: {}", path))
 }
 
+fn get<'a>(contents: &'a Value, path: &str) -> Result<&'a Value> {
+    path.split('.')
+        .fold(Some(contents), |val, key| val.and_then(|v| v.get(key)))
+        .ok_or_else(|| anyhow!("read config error: {}", path))
+}
+
 pub fn to_value(contents: &str) -> Result<Value> {
     let v = serde_json::from_str(contents)?;
     Ok(v)
@@ -90,6 +97,39 @@ pub fn get_port(contents: &str) -> Result<u16> {
     port.as_u64()
         .map(|v| v as u16)
         .ok_or_else(|| anyhow!("not found port"))
+}
+
+/// 从配置中读取出protocol与port组合host为一个标准proxy url。
+///
+/// 如：`socks5://192.168.1.1:9000`
+///
+/// # Errors
+///
+/// * config解析错误： protocol, port
+/// * 如果当前protocol不支持
+pub fn get_proxy_url(config: &str, host: &str) -> Result<String> {
+    get_proxy_url_from_value(&to_value(config)?, host)
+}
+
+fn get_proxy_url_from_value(value: &Value, host: &str) -> Result<String> {
+    let mut prot = get(value, "inbound.protocol")?
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("not found protocol"))?;
+    let prot = if prot == "socks" {
+        prot.push('5');
+        prot
+    } else if prot.contains("http") {
+        prot
+    } else {
+        log::error!("found unsupported protocol {}", prot);
+        return Err(ConfigError::Unsupported("inbound.protocol".to_string(), prot).into());
+    };
+    let port = get(value, "inbound.port")?
+        .as_u64()
+        .map(|v| v as u16)
+        .ok_or_else(|| anyhow!("not found port"))?;
+    Ok(format!("{}://{}:{}", prot, host, port))
 }
 
 // fn get_mut1<'a>(contents: &'a mut Value, path: &str) -> Result<&'a mut Value> {
@@ -340,6 +380,27 @@ mod tests {
         for i in 0..vnext.len() {
             check_vnext_item(&vnext[i], nodes[i]);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_url_parse() -> Result<()> {
+        let host = "127.0.0.1";
+        let mut config = to_value(&get_config_string())?;
+        let mut test = |prot: &str| -> Result<()> {
+            *get_mut(&mut config, "inbound.protocol")? = json!(prot);
+            let prot = if prot == "socks" { "socks5" } else { prot };
+            if get_proxy_url_from_value(&config, host)? != format!("{}://{}:1080", prot, host) {
+                Err(anyhow!("not inconsistent"))
+            } else {
+                Ok(())
+            }
+        };
+        test("socks")?;
+        test("http")?;
+        test("https")?;
+
+        assert!(test("nothings__").is_err());
         Ok(())
     }
 

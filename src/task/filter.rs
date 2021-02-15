@@ -1,11 +1,11 @@
-use std::{ops::Deref, sync::Arc};
+use std::{sync::Arc};
 
-use super::v2ray_task_config::{SwitchFilterProperty, TcpPingFilterProperty};
+
 use crate::task::switch::*;
-use crate::tcp_ping::*;
-use crate::v2ray::node::Node;
-use anyhow::anyhow;
-use async_trait::async_trait;
+
+
+
+
 use regex::Regex;
 
 pub trait Filter<T, R>: Send + Sync {

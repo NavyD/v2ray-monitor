@@ -2,11 +2,11 @@ use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc, time::Duration};
 
 use crate::{
     tcp_ping::TcpPingStatistic,
-    v2ray::{config, node::Node, V2rayService},
+    v2ray::{node::Node, V2rayService},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result};
 use async_trait::async_trait;
-use log::trace;
+
 use parking_lot::Mutex;
 use reqwest::Proxy;
 
@@ -125,7 +125,7 @@ impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
         let mut last_checked = false;
         let mut max_retries = switch.retry.count;
         let (mut last_switched, mut last_dura) = (None::<Vec<SwitchNodeStat>>, None);
-        let mut next_exited = false;
+        let next_exited = false;
         loop {
             log::debug!("retrying check networking on all count: {}", all_count);
             match retry_on_duration_owned(
@@ -178,7 +178,7 @@ impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
                         }
                         let config = self
                             .v2
-                            .apply_config(
+                            .gen_config(
                                 &selected
                                     .iter()
                                     .map(|s| s.node.clone())
@@ -187,7 +187,7 @@ impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
                                     .collect::<Vec<_>>(),
                             )
                             .await?;
-                        self.v2.restart_in_background(&config).await?;
+                        self.v2.clean_start_in_background(&config).await?;
                         last_switched = Some(selected);
                         continue;
                     } else {

@@ -1,6 +1,6 @@
-use crate::v2ray::V2rayService;
+use crate::v2ray::{ConfigurableV2ray, V2rayService};
 use crate::{task::v2ray_task_config::*, v2ray::node::Node};
-use async_trait::async_trait;
+
 use std::{
     borrow::{Borrow, BorrowMut},
     cmp::Ordering,
@@ -13,14 +13,50 @@ use std::{
 
 use anyhow::{anyhow, Result};
 
-use reqwest::Proxy;
+use async_trait::async_trait;
+use parking_lot::Mutex;
+use reqwest::{Client, Proxy};
 use tokio::{
     fs::read_to_string,
     io::*,
     net::TcpListener,
     process::{Child, Command},
-    sync::{mpsc::channel, Mutex, Semaphore},
+    sync::{mpsc::channel, Semaphore},
 };
+
+// #[async_trait]
+// pub trait TcpPingService: Send + Sync {
+//     async fn ping(&self, node: &Node) -> Result<TcpPingStatistic>;
+
+//     async fn ping_batch<'a>(
+//         &self,
+//         nodes: &[&'a Node],
+//     ) -> Result<(Vec<(&'a Node, TcpPingStatistic)>, Option<Vec<&'a Node>>)>;
+// }
+
+// pub struct TcpPingServiceImpl<V: V2rayService + ConfigurableV2ray> {
+//     ports: Arc<Mutex<Vec<u16>>>,
+//     prop: Arc<PingProperty>,
+//     v2: V,
+// }
+
+// impl<V: V2rayService + ConfigurableV2ray> TcpPingServiceImpl<V> {
+
+// }
+
+// #[async_trait]
+// impl<V: V2rayService + ConfigurableV2ray> TcpPingService for TcpPingServiceImpl<V> {
+//     async fn ping(&self, node: &Node) -> Result<TcpPingStatistic> {
+//         todo!()
+//     }
+
+//     async fn ping_batch<'a>(
+//         &self,
+//         nodes: &[&'a Node],
+//     ) -> Result<(Vec<(&'a Node, TcpPingStatistic)>, Option<Vec<&'a Node>>)> {
+//         todo!()
+//     }
+// }
 
 #[derive(Debug, Eq, Clone)]
 pub struct TcpPingStatistic {
@@ -116,7 +152,7 @@ async fn tcp_ping<T: V2rayService>(
     prop: &PingProperty,
 ) -> Result<TcpPingStatistic> {
     let port = service.get_available_port().await?;
-    let config = config::gen_tcp_ping_config(node, port)?;
+    let config = service.gen_ping_config(&[node], port).await?;
     log::trace!(
         "generated node: {:?}, port: {}, config: {}",
         node,
@@ -168,13 +204,110 @@ async fn tcp_ping<T: V2rayService>(
     Ok(TcpPingStatistic::new(durations))
 }
 
+async fn ping_task(prop: &PingProperty, proxy_url: &str) -> Result<TcpPingStatistic> {
+    let (url, count, timeout) = (prop.ping_url.clone(), prop.count, prop.timeout);
+    let mut durations: Vec<Option<Duration>> = vec![None; count as usize];
+    let (tx, mut rx) = channel(count.into());
+
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .proxy(Proxy::all(proxy_url)?)
+        .build()?;
+
+    async fn compute_duration(client: &Client, url: &str) -> Result<Duration> {
+        log::trace!("sending get request url: `{}`", url);
+        let start = Instant::now();
+        let status = client.get(url).send().await?.status();
+        let duration = Instant::now() - start;
+        if status.as_u16() >= 400 {
+            log::info!("request {} has error status: {}", url, status);
+        }
+        log::trace!("request {} has duration: {:?}", url, duration);
+        Ok(duration)
+    }
+
+    for i in 0..count {
+        let url = url.clone();
+        let tx = tx.clone();
+        let client = client.clone();
+        tokio::spawn(async move {
+            let idx_du = compute_duration(&client, &url)
+                .await
+                .map(|d| (i, Some(d)))
+                .unwrap_or_else(|e| {
+                    log::trace!("not found duration: {}", e);
+                    (i, None)
+                });
+            tx.send(idx_du)
+                .await
+                .unwrap_or_else(|e| panic!("send on {:?} error: {}", idx_du, e));
+        });
+    }
+
+    drop(tx);
+
+    log::trace!("waiting for measure duration {} tasks", count);
+    while let Some((i, du)) = rx.recv().await {
+        log::trace!("received task result: ({}, {:?})", i, du);
+        durations[i as usize] = du;
+    }
+    Ok(TcpPingStatistic::new(durations))
+}
+
+async fn ping_batch<'a, T: V2rayService + 'static>(
+    v2: T,
+    nodes: Vec<Node>,
+    prop: &PingProperty,
+) -> Result<(Vec<(&'a Node, TcpPingStatistic)>, Option<Vec<&'a Node>>)> {
+    if nodes.is_empty() {
+        return Err(anyhow!("nodes is empty"));
+    }
+    let size = nodes.len();
+    log::debug!("starting tcp ping {} nodes", size);
+    let ports = v2.get_running_ports();
+    if ports.is_none() {
+        return Err(anyhow!("not found running ports in v2 service"));
+    }
+
+    let (tx, mut rx) = channel(size);
+    let semaphore = Arc::new(Semaphore::new(prop.concurr_num));
+    let start = Instant::now();
+    for node in nodes {
+        let (prop, semaphore, tx, service) =
+            (prop.clone(), semaphore.clone(), tx.clone(), v2.clone());
+        tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
+            let ps = ping_task(&prop, proxy_url);
+            tx.send((node, ps)).await.unwrap();
+        });
+    }
+
+    drop(tx);
+
+    while let Some((node, ps)) = rx.recv().await {
+        if let Err(e) = ps {
+            log::warn!(
+                "ignored node name: {:?}, address: {:?}, for received error tcp ping: {}",
+                node.remark,
+                node.add,
+                e
+            );
+        } else {
+            res.push((node, ps.unwrap()));
+        }
+    }
+    let perform_duration = Instant::now() - start;
+    log::debug!("tcp ping {} nodes takes {:?}", size, perform_duration);
+    todo!()
+}
+
 /// ping nodes并返回统计数据
 ///
 /// 用户可使用[`PingProperty::concurr_num`]控制并发v2ray数，但对系统有内存要求
 ///
 /// 如果没有找到对应可用的端口则跳过这个node统计
 pub async fn tcp_ping_nodes<T: V2rayService + 'static>(
-    service: T,
+    v2: T,
     nodes: Vec<Node>,
     prop: &PingProperty,
 ) -> Vec<(Node, TcpPingStatistic)> {
@@ -190,7 +323,7 @@ pub async fn tcp_ping_nodes<T: V2rayService + 'static>(
     let start = Instant::now();
     for node in nodes {
         let (prop, semaphore, tx, service) =
-            (prop.clone(), semaphore.clone(), tx.clone(), service.clone());
+            (prop.clone(), semaphore.clone(), tx.clone(), v2.clone());
 
         tokio::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
@@ -233,6 +366,28 @@ async fn measure_duration_with_proxy(
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .proxy(Proxy::https(&format!("socks5://127.0.0.1:{}", proxy_port))?)
+        .build()?;
+
+    let start = Instant::now();
+    let status = client.get(url).send().await?.status();
+    let duration = Instant::now() - start;
+
+    if status.as_u16() >= 400 {
+        log::info!("request {} has error status: {}", url, status);
+    }
+    log::trace!("request {} has duration: {:?}", url, duration);
+    Ok(duration)
+}
+async fn compute_duration(
+    url: &str,
+    proxy_url: &str,
+    timeout: Duration,
+) -> reqwest::Result<Duration> {
+    log::trace!("sending get request url: `{}` by proxy: {}", url, proxy_url);
+
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .proxy(Proxy::all(proxy_url)?)
         .build()?;
 
     let start = Instant::now();

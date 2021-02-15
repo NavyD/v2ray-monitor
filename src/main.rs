@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use env_logger::Env;
-use task::v2ray_task_config::*;
-use tokio::{fs::read_to_string, time::sleep};
+
+use tokio::{time::sleep};
 
 mod task;
 mod tcp_ping;

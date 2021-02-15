@@ -1,8 +1,4 @@
-use std::{
-    fmt::{Debug, Display},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{fmt::{Debug, Display}, future::Future, sync::Arc, time::{Duration, Instant}};
 
 pub mod filter;
 pub mod switch;
@@ -10,7 +6,6 @@ pub mod v2ray_task_config;
 pub mod v2ray_tasks;
 
 use anyhow::{anyhow, Result};
-use futures::Future;
 
 use tokio::time::sleep;
 
@@ -195,15 +190,18 @@ where
     }
 }
 
-fn find_bin_path(name: &str) -> Result<String> {
-    let exe_name = "v2ray";
+pub fn find_v2ray_bin_path() -> Result<String> {
+    find_bin_path("v2ray")
+}
+
+pub fn find_bin_path(name: &str) -> Result<String> {
     std::env::var_os("PATH")
         .and_then(|val| {
             std::env::split_paths(&val).find_map(|path| {
-                if path.is_file() && path.ends_with(exe_name) {
+                if path.is_file() && path.ends_with(name) {
                     return Some(path);
                 }
-                let path = path.join(exe_name);
+                let path = path.join(name);
                 if path.is_file() {
                     return Some(path);
                 }
@@ -217,4 +215,21 @@ fn find_bin_path(name: &str) -> Result<String> {
 #[async_trait::async_trait]
 pub trait TaskRunnable {
     async fn run(&self) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_v2ray_bin_path_test() -> Result<()>{
+        let path = find_bin_path("v2ray")?;
+        assert!(path.contains("v2ray"));
+        Ok(())
+    }
+
+    #[test]
+    fn not_found_bin_path() {
+        assert!(find_bin_path("__no_exist_v2ray_").is_err());
+    }
 }

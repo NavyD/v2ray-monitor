@@ -1,0 +1,55 @@
+test
+test
+V2Ray 4.31.0 (V2Fly, a community-driven edition of V2Ray.) Custom (go1.15.2 linux/amd64)
+A unified platform for anti-censorship.
+2021/02/15 17:44:59 [Info] v2ray.com/core/common/platform/ctlcmd: <v2ctl message> 
+v2ctl> Read config:  /home/navyd/Downloads/v2ray/v2-config-test.json
+2021/02/15 17:44:59 [Debug] v2ray.com/core/app/log: Logger started
+2021/02/15 17:44:59 [Debug] v2ray.com/core/app/proxyman/inbound: creating stream worker on 127.0.0.1:1080
+2021/02/15 17:44:59 [Info] v2ray.com/core/transport/internet/tcp: listening TCP on 127.0.0.1:1080
+2021/02/15 17:44:59 [Warning] v2ray.com/core: V2Ray 4.31.0 started
+V2Ray 4.31.0 (V2Fly, a community-driven edition of V2Ray.) Custom (go1.15.2 linux/amd64)
+A unified platform for anti-censorship.
+2021/02/15 17:52:04 [Info] v2ray.com/core/common/platform/ctlcmd: <v2ctl message> 
+v2ctl> Read config:  /home/navyd/Downloads/v2ray/v2-config-test.json
+2021/02/15 17:52:04 [Debug] v2ray.com/core/app/log: Logger started
+2021/02/15 17:52:04 [Debug] v2ray.com/core/app/proxyman/inbound: creating stream worker on 127.0.0.1:1080
+2021/02/15 17:52:04 [Info] v2ray.com/core/transport/internet/tcp: listening TCP on 127.0.0.1:1080
+2021/02/15 17:52:04 [Warning] v2ray.com/core: V2Ray 4.31.0 started
+V2Ray 4.31.0 (V2Fly, a community-driven edition of V2Ray.) Custom (go1.15.2 linux/amd64)
+A unified platform for anti-censorship.
+2021/02/15 18:06:51 [Info] v2ray.com/core/common/platform/ctlcmd: <v2ctl message> 
+v2ctl> Read config:  /home/navyd/Downloads/v2ray/v2-config-test.json
+2021/02/15 18:06:51 [Debug] v2ray.com/core/app/log: Logger started
+2021/02/15 18:06:51 [Debug] v2ray.com/core/app/proxyman/inbound: creating stream worker on 127.0.0.1:1080
+2021/02/15 18:06:51 [Info] v2ray.com/core/transport/internet/tcp: listening TCP on 127.0.0.1:1080
+2021/02/15 18:06:51 [Warning] v2ray.com/core: V2Ray 4.31.0 started
+V2Ray 4.31.0 (V2Fly, a community-driven edition of V2Ray.) Custom (go1.15.2 linux/amd64)
+A unified platform for anti-censorship.
+2021/02/15 18:06:58 [Info] v2ray.com/core/common/platform/ctlcmd: <v2ctl message> 
+v2ctl> Read config:  /home/navyd/Downloads/v2ray/v2-config-test.json
+2021/02/15 18:06:58 [Debug] v2ray.com/core/app/log: Logger started
+2021/02/15 18:06:58 [Debug] v2ray.com/core/app/proxyman/inbound: creating stream worker on 127.0.0.1:1080
+2021/02/15 18:06:58 [Info] v2ray.com/core/transport/internet/tcp: listening TCP on 127.0.0.1:1080
+2021/02/15 18:06:58 [Warning] v2ray.com/core: V2Ray 4.31.0 started
+test
+test
+test
+test
+test
+V2Ray 4.31.0 (V2Fly, a community-driven edition of V2Ray.) Custom (go1.15.2 linux/amd64)
+A unified platform for anti-censorship.
+2021/02/15 18:26:22 [Info] v2ray.com/core/common/platform/ctlcmd: <v2ctl message> 
+v2ctl> Read config:  /home/navyd/Downloads/v2ray/v2-config-test.json
+2021/02/15 18:26:22 [Debug] v2ray.com/core/app/log: Logger started
+2021/02/15 18:26:22 [Debug] v2ray.com/core/app/proxyman/inbound: creating stream worker on 127.0.0.1:1080
+2021/02/15 18:26:22 [Info] v2ray.com/core/transport/internet/tcp: listening TCP on 127.0.0.1:1080
+2021/02/15 18:26:22 [Warning] v2ray.com/core: V2Ray 4.31.0 started
+V2Ray 4.31.0 (V2Fly, a community-driven edition of V2Ray.) Custom (go1.15.2 linux/amd64)
+A unified platform for anti-censorship.
+2021/02/15 18:26:24 [Info] v2ray.com/core/common/platform/ctlcmd: <v2ctl message> 
+v2ctl> Read config:  /home/navyd/Downloads/v2ray/v2-config-test.json
+2021/02/15 18:26:24 [Debug] v2ray.com/core/app/log: Logger started
+2021/02/15 18:26:24 [Debug] v2ray.com/core/app/proxyman/inbound: creating stream worker on 127.0.0.1:1080
+2021/02/15 18:26:24 [Info] v2ray.com/core/transport/internet/tcp: listening TCP on 127.0.0.1:1080
+2021/02/15 18:26:24 [Warning] v2ray.com/core: V2Ray 4.31.0 started

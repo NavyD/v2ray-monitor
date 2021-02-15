@@ -1,0 +1,48 @@
+{
+    "log": {
+        "loglevel": "debug"
+    },
+    "inbound": {
+        "settings": {
+            "timeout": 5,
+            "allowTransparent": false,
+            "userLevel": 0
+        },
+        "protocol": "http",
+        "port": 1080,
+        "sniffing": {
+            "enabled": true,
+            "destOverride": [
+                "http",
+                "tls"
+            ]
+        },
+        "listen": "127.0.0.1"
+    },
+    "outbound": {
+        "settings": {
+            "vnext": [
+                {
+                    "address": "gz02.mobile.lay168.net",
+                    "port": 61033,
+                    "users": [
+                        {
+                            "id": "55fb0457-d874-32c3-89a2-679fed6eabf1",
+                            "alterId": 2
+                        }
+                    ]
+                }
+            ]
+        },
+        "protocol": "vmess",
+        "streamSettings": {
+            "wsSettings": {
+                "path": "/hls",
+                "headers": {
+                    "host": "hkt01.pqs-vds.lay168.net"
+                }
+            },
+            "network": "ws"
+        }
+    }
+}

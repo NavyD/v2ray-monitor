@@ -20,7 +20,7 @@ tcp_ping:
       secs: 10
       nanos: 10
 subscpt:
-  path: v2ray-subscription.txt
+  path: tests/data/v2ray-subscription.txt
   url: https://www.jinkela.site/link/ukWr5K49YjHIQGdL?sub=3
   update_interval:
     secs: 43200
@@ -38,7 +38,7 @@ switch:
   check_timeout:
     secs: 2
     nanos: 0
-  filter: 
+  filter:
     lb_nodes_size: 3
     name_regex: "→香港"
   retry:
@@ -55,4 +55,4 @@ switch:
     config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
     bin_path: /usr/bin/v2ray
   local:
-    config_path: /var/etc/ssrplus
+    config_path: tests/data/local-v2-config.json
