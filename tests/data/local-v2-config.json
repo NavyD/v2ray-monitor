@@ -39,7 +39,7 @@
             "wsSettings": {
                 "path": "/hls",
                 "headers": {
-                    "host": "hkt01.pqs-vds.lay168.net"
+                    "Host": "hkt01.pqs-vds.lay168.net"
                 }
             },
             "network": "ws"

@@ -38,14 +38,14 @@ pub trait ConfigurableV2ray {
 
     async fn gen_config(&self, nodes: &[&Node]) -> Result<String>;
 
-    async fn gen_ping_config(&self, nodes: &[&Node], port: u16) -> Result<String> {
+    async fn gen_ping_config(&self, node: &Node, port: u16) -> Result<String> {
         let config = self.get_config().await?;
-        Ok(config::apply_config(config, nodes, Some(port))?)
+        Ok(config::apply_config(config, &[node], Some(port))?)
     }
 }
 
 #[async_trait]
-pub trait V2rayService: Send + Sync + Clone + ConfigurableV2ray {
+pub trait V2rayService: Send + Sync + Clone + ConfigurableV2ray + 'static {
     /// 启动v2ray并返回对应的v2ray进程，由调用者控制进程
     async fn start(&self, config: &str) -> Result<Child>;
 
@@ -66,6 +66,10 @@ pub trait V2rayService: Send + Sync + Clone + ConfigurableV2ray {
     fn is_running(&self, port: u16) -> bool;
 
     fn get_host(&self) -> &str;
+
+    async fn get_proxy_url(&self, config: &str) -> Result<String> {
+        config::get_proxy_url(config, self.get_host())
+    }
 
     async fn clean_start_in_background(&self, config: &str) -> Result<()> {
         self.clean_env().await?;
@@ -361,6 +365,10 @@ impl ConfigurableV2ray for LocalV2ray {
 impl V2rayService for LocalV2ray {
     /// 从bin path中使用config启动v2ray 并返回子进程 由用户控制
     async fn start(&self, config: &str) -> Result<Child> {
+        if log::log_enabled!(log::Level::Trace) {
+            let port = config::get_port(config)?;
+            log::trace!("starting v2ray on port {}", port);
+        }
         let mut child = Command::new(&self.prop.bin_path)
             .arg("-config")
             .arg("stdin:")
@@ -572,13 +580,13 @@ mod tests {
         }
         let grep = |key: &str| {
             exe_arg(
-                format!("sh -c"),
+                "sh -c".to_string(),
                 format!("ps -ef | grep {} | grep -v grep", key),
             )
         };
         let grep_wc = |key: &str| {
             exe_arg(
-                format!("sh -c"),
+                "sh -c".to_string(),
                 format!("ps -ef | grep {} | grep -v grep | wc -l", key),
             )
         };
@@ -757,171 +765,3 @@ bin_path: /usr/bin/v2ray
         .unwrap()
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-
-//     use std::sync::Once;
-
-//     use super::*;
-//     use log::LevelFilter;
-
-//     #[cfg(test)]
-//     mod v2ray_tests {
-//         use super::*;
-
-//         #[tokio::test]
-//         async fn tcp_ping() -> Result<()> {
-//             let v2 = V2ray::new(Default::default());
-//             let pp = Default::default();
-//             let nodes = vec![get_node(), get_node(), get_node()];
-//             let ps = v2.tcp_ping_nodes(nodes, &pp).await;
-//             log::debug!("{:?}", ps);
-//             Ok(())
-//         }
-//     }
-
-//     #[tokio::test]
-//     async fn get_config_ssh_test() -> Result<()> {
-//         let (username, host, path) = (
-//             "root",
-//             "openwrt",
-//             "/var/etc/ssrplus/tcp-only-ssr-retcp.json",
-//         );
-//         let config = get_config_ssh(username, host, path).await?;
-//         assert!(config.contains(r#""port": 1234"#));
-//         assert!(!config.contains(path));
-//         Ok(())
-//     }
-
-//     #[tokio::test]
-//     async fn get_config_ssh_parse_test() -> Result<()> {
-//         let (username, host, path) = (
-//             "root",
-//             "openwrt",
-//             "/var/etc/ssrplus/tcp-only-ssr-retcp.json",
-//         );
-//         let node = get_node();
-//         let config = get_config_ssh(username, host, path).await?;
-
-//         let config = apply_config(&config, &[&node], None)?;
-//         assert!(config.contains(&node.add.unwrap()));
-//         Ok(())
-//     }
-
-//     #[tokio::test]
-//     async fn start_test() -> Result<()> {
-//         let node = get_node();
-//         let vp = V2rayProperty::default();
-//         let config = gen_tcp_ping_config(&node, get_available_port().await?)?;
-//         let bin_path = vp
-//             .bin_path
-//             .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
-
-//         start(&bin_path, &config).await?;
-//         Ok(())
-//     }
-
-//     // #[test]
-//     #[tokio::test]
-//     async fn measure_duration_with_v2ray_start() -> Result<()> {
-//         let node = get_node();
-//         let vp = V2rayProperty::default();
-//         let pp = PingProperty::default();
-
-//         let local_port = get_available_port().await?;
-//         let config = gen_tcp_ping_config(&node, local_port)?;
-//         let bin_path = vp
-//             .bin_path
-//             .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
-
-//         let mut child = start(&bin_path, &config).await?;
-
-//         measure_duration_with_proxy(&pp.ping_url, local_port, Duration::from_secs(2))
-//             .await
-//             .expect("get duration error");
-//         child.kill().await?;
-//         Ok(())
-//     }
-
-//     #[tokio::test]
-//     async fn tcp_ping_test() -> Result<()> {
-//         let node = get_node();
-//         let vp = V2rayProperty::default();
-//         let pp = PingProperty::default();
-//         let local_port = get_available_port().await?;
-//         let config = gen_tcp_ping_config(&node, local_port)?;
-//         let bin_path = vp
-//             .bin_path
-//             .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
-
-//         let stats = tcp_ping(&bin_path, &config, local_port, &pp).await?;
-//         assert_eq!(
-//             stats.durations.len(),
-//             PingProperty::default().count as usize
-//         );
-//         assert!(stats.durations.iter().filter(|d| d.is_some()).count() > 0);
-//         Ok(())
-//     }
-
-//     #[tokio::test]
-//     async fn tcp_ping_error_when_node_unavailable() -> Result<()> {
-//         let mut node = get_node();
-//         node.add = Some("test.host.addr".to_owned());
-
-//         let vp = V2rayProperty::default();
-//         let pp = PingProperty::default();
-//         let local_port = get_available_port().await?;
-//         let config = gen_tcp_ping_config(&node, local_port)?;
-//         let bin_path = vp
-//             .bin_path
-//             .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
-
-//         let stats = tcp_ping(&bin_path, &config, local_port, &pp).await?;
-
-//         assert_eq!(
-//             stats.durations.len(),
-//             PingProperty::default().count as usize
-//         );
-//         assert_eq!(stats.durations.iter().filter(|d| d.is_some()).count(), 0);
-//         Ok(())
-//     }
-
-//     static INIT: Once = Once::new();
-
-//     #[cfg(test)]
-//     #[ctor::ctor]
-//     fn init() {
-//         INIT.call_once(|| {
-//             env_logger::builder()
-//                 .is_test(true)
-//                 .filter_level(LevelFilter::Info)
-//                 .filter_module("v2ray_monitor", LevelFilter::Trace)
-//                 .init();
-//         });
-//     }
-
-//     fn get_node() -> Node {
-//         serde_json::from_str(
-//             r#"{
-//             "host": "hk02.az.jinkela.icu",
-//             "path": "/hls",
-//             "tls": "",
-//             "verify_cert": true,
-//             "add": "gz01.mobile.lay168.net",
-//             "port": 61022,
-//             "aid": 2,
-//             "net": "ws",
-//             "headerType": "none",
-//             "localserver": "hk02.az.jinkela.icu",
-//             "v": "2",
-//             "type": "vmess",
-//             "ps": "广州01→香港02 | 1.5x NF",
-//             "remark": "广州01→香港02 | 1.5x NF",
-//             "id": "55fb0457-d874-32c3-89a2-679fed6eabf1",
-//             "class": 1
-//         }"#,
-//         )
-//         .unwrap()
-//     }
-// }

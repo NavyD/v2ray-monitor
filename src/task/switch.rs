@@ -4,7 +4,7 @@ use crate::{
     tcp_ping::TcpPingStatistic,
     v2ray::{node::Node, V2rayService},
 };
-use anyhow::{Result};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
 use parking_lot::Mutex;
@@ -12,9 +12,8 @@ use reqwest::Proxy;
 
 use super::{
     filter::{Filter, *},
-    next_beb_interval, retry_on_duration_owned, retry_on_owned,
     v2ray_task_config::{SwitchFilterProperty, SwitchTaskProperty},
-    TaskRunnable,
+    RetryService, TaskRunnable,
 };
 
 #[derive(Clone)]
@@ -103,6 +102,20 @@ pub struct SwitchTask<V: V2rayService> {
 }
 
 impl<V: V2rayService> SwitchTask<V> {
+    pub fn new(prop: SwitchTaskProperty, v2: V) -> Self {
+        Self {
+            stats: Arc::new(Mutex::new(BinaryHeap::new())),
+            v2,
+            pre_filter: Box::new(NameRegexFilter::new(&[prop
+                .filter
+                .name_regex
+                .clone()
+                .unwrap()])),
+            select_filter: Box::new(SwitchSelectFilter::new(prop.filter.lb_nodes_size.into())),
+            prop,
+        }
+    }
+
     pub async fn update_node_stats(&self, node_stats: Vec<(Node, TcpPingStatistic)>) {
         *self.stats.lock() = node_stats
             .into_iter()
@@ -115,32 +128,33 @@ impl<V: V2rayService> SwitchTask<V> {
 #[async_trait]
 impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
     async fn run(&self) -> anyhow::Result<()> {
+        if self.stats.lock().is_empty() {
+            return Err(anyhow!("no any stats"));
+        }
         let switch = self.prop.clone();
         let task = {
             let check_url = switch.check_url.to_owned();
             let timeout = switch.check_timeout;
-            Arc::new(move || check_networking_owned(check_url.clone(), timeout, None))
+            move || check_networking_owned(check_url.clone(), timeout, None)
         };
         let mut all_count = 0;
         let mut last_checked = false;
         let mut max_retries = switch.retry.count;
         let (mut last_switched, mut last_dura) = (None::<Vec<SwitchNodeStat>>, None);
-        let next_exited = false;
+        let retry_srv = RetryService::new(switch.retry.clone(), task);
         loop {
             log::debug!("retrying check networking on all count: {}", all_count);
-            match retry_on_duration_owned(
-                task.clone(),
-                next_beb_interval(switch.retry.min_interval, switch.retry.max_interval),
-                max_retries,
-                last_checked,
-                &next_exited,
-            )
-            .await
-            {
+            match retry_srv.retry_on(last_checked).await {
                 Ok((retries, duration)) => {
                     all_count += retries;
+                    // 失败重试时退出表示 成功  使用最大值重试
                     if retries <= max_retries && !last_checked {
                         max_retries = std::usize::MAX;
+                        log::debug!(
+                            "reset max_retries as max because last_checked: {}, retries: {}",
+                            last_checked,
+                            retries
+                        );
                     }
                     // 上次是失败时 这次是做失败时重试 后成功退出
                     if !last_checked {
@@ -158,6 +172,7 @@ impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
                     all_count += max_retries;
                     if !last_checked {
                         log::debug!("selecting for switching nodes");
+                        // 从stats中取出节点
                         let selected = self.select_filter.filter(self.stats.clone());
                         if log::log_enabled!(log::Level::Info) {
                             let nodes_msg = selected
@@ -167,6 +182,7 @@ impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
                             log::info!("selected nodes: {:?}", nodes_msg);
                         }
 
+                        // 将上次切换的节点重入 stats 权重排序
                         if let Some(last) = last_switched {
                             log::debug!("repush for last switched nodes size: {}", last.len());
                             let mut stats = self.stats.lock();
@@ -176,6 +192,7 @@ impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
                                 stats.push(stat);
                             }
                         }
+                        // 切换节点
                         let config = self
                             .v2
                             .gen_config(
@@ -187,8 +204,10 @@ impl<V: V2rayService> TaskRunnable for SwitchTask<V> {
                                     .collect::<Vec<_>>(),
                             )
                             .await?;
-                        self.v2.clean_start_in_background(&config).await?;
+                        self.v2.start_in_background(&config).await?;
+
                         last_switched = Some(selected);
+
                         continue;
                     } else {
                         log::debug!(
@@ -222,4 +241,61 @@ async fn check_networking(url: &str, timeout: Duration, proxy_url: Option<&str>)
         log::info!("switch checking got exception status: {}", status);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::{
+        task::{find_v2ray_bin_path, v2ray_task_config::LocalV2rayProperty},
+        v2ray::LocalV2ray,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn basic() -> Result<()> {
+        let prop = get_switch_prop()?;
+        let v2 = LocalV2ray::new(prop.local.clone());
+        let task = SwitchTask::new(prop, v2);
+
+        task.run().await?;
+        Ok(())
+    }
+
+    fn get_local_prop() -> Result<LocalV2rayProperty> {
+        Ok(LocalV2rayProperty {
+            bin_path: find_v2ray_bin_path()?,
+            config_path: Some("tests/data/local-v2-config.json".to_string()),
+        })
+    }
+
+    fn get_switch_prop() -> Result<SwitchTaskProperty> {
+        let content = r#"
+check_url: https://www.google.com/gen_204
+check_timeout: 2s
+filter:
+    lb_nodes_size: 3
+    name_regex: "→香港"
+retry:
+    count: 7
+    interval_algo:
+        type: "Beb"
+        min: "2s"
+        max: "40s"
+    half:
+        start: "02:00:00"
+        interval: 5h
+ssh:
+    username: root
+    host: 192.168.93.2
+    config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
+    bin_path: /usr/bin/v2ray
+local:
+    config_path: tests/data/local-v2-config.json
+    
+        "#;
+        serde_yaml::from_str::<SwitchTaskProperty>(content).map_err(Into::into)
+    }
 }

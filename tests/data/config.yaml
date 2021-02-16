@@ -1,54 +1,46 @@
 tcp_ping:
-  ping_interval:
-    secs: 900
-    nanos: 0
+  ping_interval: 15min
   filter:
     node_name_regex: "test"
   ping:
     count: 3
     ping_url: https://www.google.com/gen_204
-    timeout:
-      secs: 1
-      nanos: 5000000
+    timeout: 1s 500ms
     concurr_num: 10
   retry_failed:
     count: 3
-    min_interval:
-      secs: 10
-      nanos: 10
-    max_interval:
-      secs: 10
-      nanos: 10
+    interval_algo:
+      type: "Beb"
+      min: "10s"
+      max: "60s"
+  subscpt_path: tests/data/v2ray-subscription.txt
+
 subscpt:
   path: tests/data/v2ray-subscription.txt
   url: https://www.jinkela.site/link/ukWr5K49YjHIQGdL?sub=3
-  update_interval:
-    secs: 43200
-    nanos: 0
+  update_interval: 12h
   retry_failed:
     count: 3
-    min_interval:
-      secs: 2
-      nanos: 0
-    max_interval:
-      secs: 60
-      nanos: 0
+    interval_algo:
+      type: "Beb"
+      min: "5s"
+      max: "30s"
+
 switch:
   check_url: https://www.google.com/gen_204
-  check_timeout:
-    secs: 2
-    nanos: 0
+  check_timeout: 2s
   filter:
     lb_nodes_size: 3
     name_regex: "→香港"
   retry:
     count: 7
-    min_interval:
-      secs: 0
-      nanos: 100000000
-    max_interval:
-      secs: 40
-      nanos: 0
+    interval_algo:
+      type: "Beb"
+      min: "2s"
+      max: "40s"
+    half:
+      start: "02:00:00"
+      interval: 5h
   ssh:
     username: root
     host: 192.168.93.2

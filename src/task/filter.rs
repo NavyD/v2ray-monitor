@@ -1,10 +1,6 @@
-use std::{sync::Arc};
+use std::sync::Arc;
 
-
-use crate::task::switch::*;
-
-
-
+use crate::{task::switch::*, v2ray::node::Node};
 
 use regex::Regex;
 
@@ -20,8 +16,14 @@ pub struct FilterManager<T, R> {
     filters: Arc<Vec<Box<dyn Filter<T, R>>>>,
 }
 
-struct SwitchSelectFilter {
+pub struct SwitchSelectFilter {
     size: usize,
+}
+
+impl SwitchSelectFilter {
+    pub fn new(size: usize) -> Self {
+        Self { size }
+    }
 }
 
 impl Filter<SwitchData, Vec<SwitchNodeStat>> for SwitchSelectFilter {
@@ -79,6 +81,17 @@ impl NameRegexFilter {
                 })
                 .collect(),
         }
+    }
+}
+
+impl Filter<Vec<Node>, Vec<Node>> for NameRegexFilter {
+    fn filter(&self, mut data: Vec<Node>) -> Vec<Node> {
+        data.retain(|n| {
+            self.name_regexs
+                .iter()
+                .any(|re| re.is_match(n.remark.as_ref().unwrap()))
+        });
+        data
     }
 }
 
