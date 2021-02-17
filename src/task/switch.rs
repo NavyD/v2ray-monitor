@@ -10,7 +10,6 @@ use crate::{
     v2ray::{node::Node, V2rayService},
 };
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 
 use parking_lot::Mutex;
 use reqwest::Proxy;
@@ -311,7 +310,7 @@ mod tests {
     async fn basic() -> Result<()> {
         let prop = get_switch_prop()?;
         let v2 = LocalV2ray::new(prop.local.clone());
-        let task = SwitchTask::new(prop, v2);
+        let _task = SwitchTask::new(prop, v2);
 
         // task.run().await?;
         Ok(())

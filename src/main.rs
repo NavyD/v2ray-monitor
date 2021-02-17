@@ -2,12 +2,7 @@ use std::time::Duration;
 
 use env_logger::Env;
 
-use tokio::{fs::read_to_string, sync::mpsc::channel, time::sleep};
-use v2ray_monitor::{
-    self,
-    task::{switch::SwitchTask, tcp_ping::TcpPingTask, v2ray_task_config::V2rayTaskProperty},
-    v2ray::{node::load_subscription_nodes_from_file, LocalV2ray},
-};
+use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

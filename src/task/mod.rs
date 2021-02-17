@@ -1,24 +1,20 @@
 use std::{
-    cell::RefCell,
-    fmt::{Debug, Display},
     future::Future,
-    rc::Rc,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 
 pub mod filter;
+pub mod subscription;
 pub mod switch;
 pub mod tcp_ping;
 pub mod v2ray_task_config;
 pub mod v2ray_tasks;
-pub mod subscription;
 
 use anyhow::{anyhow, Result};
 
-use chrono::{Date, DateTime, Local, NaiveTime, Utc};
+use chrono::{DateTime, Local, NaiveTime};
 
-use log::trace;
 use parking_lot::Mutex;
 use tokio::time::{sleep, timeout};
 
@@ -27,7 +23,6 @@ struct Stat {
     half_start: Option<SystemTime>,
     failed_count: usize,
     success_count: usize,
-    last_checked: bool,
 }
 
 pub struct RetryService {
@@ -54,7 +49,6 @@ impl RetryService {
                 half_start,
                 failed_count: 0,
                 success_count: 0,
-                last_checked: false,
             })),
         }
     }
@@ -69,16 +63,16 @@ impl RetryService {
         *retry
     }
 
-    fn retry_count_incr(&self, ok_or_err: bool) -> usize {
-        let mut stat = self.stat.lock();
-        let retry = if ok_or_err {
-            &mut stat.success_count
-        } else {
-            &mut stat.failed_count
-        };
-        *retry += 1;
-        *retry
-    }
+    // fn retry_count_incr(&self, ok_or_err: bool) -> usize {
+    //     let mut stat = self.stat.lock();
+    //     let retry = if ok_or_err {
+    //         &mut stat.success_count
+    //     } else {
+    //         &mut stat.failed_count
+    //     };
+    //     *retry += 1;
+    //     *retry
+    // }
 
     /// 根据在func执行结果决定是否重新执行func
     ///

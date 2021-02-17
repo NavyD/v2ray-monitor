@@ -4,31 +4,17 @@ pub mod node;
 use crate::task::v2ray_task_config::*;
 use async_trait::async_trait;
 
-use config::get_port;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use regex::Regex;
-use std::{
-    borrow::{Borrow, BorrowMut},
-    cmp::Ordering,
-    collections::HashMap,
-    env::{split_paths, var_os},
-    fs,
-    ops::{Deref, DerefMut},
-    process::Stdio,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, fs, process::Stdio, sync::Arc};
 
 use anyhow::{anyhow, Result};
 
 use tokio::{
-    fs::read_to_string,
     io::*,
     net::TcpListener,
     process::{Child, Command},
-    runtime::Runtime,
-    sync::{mpsc::channel, Semaphore},
 };
 
 use self::node::Node;
@@ -534,12 +520,7 @@ async fn exe_arg(command: &str, extra_arg: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        future::Future,
-        path::{Path, PathBuf},
-        str::FromStr,
-        sync::Once,
-    };
+    use std::{path::Path, sync::Once, time::Duration};
 
     use log::LevelFilter;
     use tokio::time::timeout;
@@ -749,27 +730,27 @@ bin_path: /usr/bin/v2ray
         });
     }
 
-    fn get_node() -> Node {
-        serde_json::from_str(
-            r#"{
-            "host": "hk02.az.jinkela.icu",
-            "path": "/hls",
-            "tls": "",
-            "verify_cert": true,
-            "add": "gz01.mobile.lay168.net",
-            "port": 61022,
-            "aid": 2,
-            "net": "ws",
-            "headerType": "none",
-            "localserver": "hk02.az.jinkela.icu",
-            "v": "2",
-            "type": "vmess",
-            "ps": "广州01→香港02 | 1.5x NF",
-            "remark": "广州01→香港02 | 1.5x NF",
-            "id": "55fb0457-d874-32c3-89a2-679fed6eabf1",
-            "class": 1
-        }"#,
-        )
-        .unwrap()
-    }
+    // fn get_node() -> Node {
+    //     serde_json::from_str(
+    //         r#"{
+    //         "host": "hk02.az.jinkela.icu",
+    //         "path": "/hls",
+    //         "tls": "",
+    //         "verify_cert": true,
+    //         "add": "gz01.mobile.lay168.net",
+    //         "port": 61022,
+    //         "aid": 2,
+    //         "net": "ws",
+    //         "headerType": "none",
+    //         "localserver": "hk02.az.jinkela.icu",
+    //         "v": "2",
+    //         "type": "vmess",
+    //         "ps": "广州01→香港02 | 1.5x NF",
+    //         "remark": "广州01→香港02 | 1.5x NF",
+    //         "id": "55fb0457-d874-32c3-89a2-679fed6eabf1",
+    //         "class": 1
+    //     }"#,
+    //     )
+    //     .unwrap()
+    // }
 }

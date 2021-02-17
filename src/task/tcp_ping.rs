@@ -10,10 +10,10 @@ use crate::{
     v2ray::{node::Node, V2rayService},
 };
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
+
 use parking_lot::Mutex;
 use tokio::{
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::mpsc::{Receiver, Sender},
     time,
 };
 
@@ -75,7 +75,7 @@ impl<V: V2rayService> TcpPingTask<V> {
         tx: Sender<Vec<(Node, TcpPingStatistic)>>,
     ) -> Result<()> {
         self.update_nodes(rx).await?;
-        let mut retry_srv = RetryService::new(self.prop.retry_failed.clone());
+        let retry_srv = RetryService::new(self.prop.retry_failed.clone());
 
         let task = {
             let v2 = self.v2.clone();

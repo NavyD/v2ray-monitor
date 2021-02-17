@@ -85,7 +85,11 @@ impl NameRegexFilter {
 
 impl Filter<Vec<Node>, Vec<Node>> for NameRegexFilter {
     fn filter(&self, mut data: Vec<Node>) -> Vec<Node> {
-        log::trace!("filtering data: {} by name regex: {}", data.len(), self.name_regex);
+        log::trace!(
+            "filtering data: {} by name regex: {}",
+            data.len(),
+            self.name_regex
+        );
         data.retain(|n| self.name_regex.is_match(n.remark.as_ref().unwrap()));
         log::trace!("{} of nodes left", data.len());
         if data.is_empty() {
@@ -97,7 +101,11 @@ impl Filter<Vec<Node>, Vec<Node>> for NameRegexFilter {
 
 impl Filter<BinaryHeap<SwitchNodeStat>, BinaryHeap<SwitchNodeStat>> for NameRegexFilter {
     fn filter(&self, mut data: BinaryHeap<SwitchNodeStat>) -> BinaryHeap<SwitchNodeStat> {
-        log::trace!("filtering data: {} by name regex: {}", data.len(), self.name_regex);
+        log::trace!(
+            "filtering data: {} by name regex: {}",
+            data.len(),
+            self.name_regex
+        );
         let data = data
             .drain()
             .filter(|ns| self.name_regex.is_match(ns.node.remark.as_ref().unwrap()))

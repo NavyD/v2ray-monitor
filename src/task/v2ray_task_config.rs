@@ -2,7 +2,7 @@ use std::{fmt::Debug, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use super::{find_v2ray_bin_path};
+use super::find_v2ray_bin_path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SubscriptionTaskProperty {
@@ -103,7 +103,6 @@ pub struct PingProperty {
     #[serde(default = "num_cpus::get")]
     pub concurr_num: usize,
 }
-
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]

@@ -1,12 +1,8 @@
-use crate::v2ray::{ConfigurableV2ray, V2rayService};
+use crate::v2ray::V2rayService;
 use crate::{task::v2ray_task_config::*, v2ray::node::Node};
 
 use std::{
-    borrow::{Borrow, BorrowMut},
     cmp::Ordering,
-    env::{split_paths, var_os},
-    ops::{Deref, DerefMut},
-    process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -99,14 +95,6 @@ impl TcpPingStatistic {
     pub fn is_accessible(&self) -> bool {
         self.received_count > 0
     }
-}
-
-pub async fn ping_batch11<'a, T: V2rayService + 'static>(
-    _v2: T,
-    _nodes: &[Node],
-    _prop: PingProperty,
-) -> Result<(Vec<(&Node, TcpPingStatistic)>, Option<Vec<&Node>>)> {
-    todo!()
 }
 
 /// 对nodes节点批量ping返回能ping通的节点与不可通的节点。

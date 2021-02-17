@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::v2ray::node::*;
 
 use super::{v2ray_task_config::SubscriptionTaskProperty, RetryService};
-use anyhow::{anyhow, Result};
-use log::warn;
+use anyhow::Result;
+
 use tokio::{fs::File, io::AsyncReadExt, sync::mpsc::Sender, time::sleep};
 pub struct SubscriptionTask {
     // nodes:

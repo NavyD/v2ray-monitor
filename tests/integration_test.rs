@@ -9,7 +9,7 @@ use v2ray_monitor::{
         tcp_ping::TcpPingTask,
         v2ray_task_config::{RetryIntevalAlgorithm, V2rayTaskProperty},
     },
-    v2ray::{node::load_subscription_nodes_from_file, LocalV2ray},
+    v2ray::LocalV2ray,
 };
 
 #[tokio::test]
