@@ -1,5 +1,5 @@
 tcp_ping:
-  ping_interval: 15min
+  ping_interval: 10s
   filter:
     node_name_regex: "test"
   ping:
@@ -11,7 +11,7 @@ tcp_ping:
     count: 3
     interval_algo:
       type: "Beb"
-      min: "10s"
+      min: "1s"
       max: "60s"
   subscpt_path: tests/data/v2ray-subscription.txt
 
@@ -39,7 +39,7 @@ switch:
       min: "2s"
       max: "40s"
     half:
-      start: "02:00:00"
+      start: "01:00:00"
       interval: 5h
   ssh:
     username: root

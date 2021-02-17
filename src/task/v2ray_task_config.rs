@@ -2,7 +2,7 @@ use std::{fmt::Debug, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use super::{RetryIntevalAlgorithm, find_bin_path, find_v2ray_bin_path};
+use super::{find_v2ray_bin_path};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SubscriptionTaskProperty {
@@ -65,8 +65,6 @@ pub struct RetryHalfProperty {
     pub interval: Duration,
 }
 
-
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TcpPingFilterProperty {
     #[serde(default)]
@@ -106,9 +104,33 @@ pub struct PingProperty {
     pub concurr_num: usize,
 }
 
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum RetryIntevalAlgorithm {
+    Beb {
+        #[serde(with = "humantime_serde")]
+        min: Duration,
+        #[serde(with = "humantime_serde")]
+        max: Duration,
+    },
+    SwitchBeb {
+        #[serde(with = "humantime_serde")]
+        min: Duration,
+        #[serde(with = "humantime_serde")]
+        max: Duration,
+        #[serde(default = "default_switch_limit")]
+        switch_limit: usize,
+    },
+}
+
+fn default_switch_limit() -> usize {
+    3
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{fs::read_to_string, time::SystemTime};
+    use std::fs::read_to_string;
 
     use humantime::Timestamp;
 

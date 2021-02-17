@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Error, Result};
-use reqwest::Proxy;
+use anyhow::{anyhow, Result};
+
 use serde_json::{json, Value};
 use thiserror::Error;
 

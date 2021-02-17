@@ -4,6 +4,7 @@ pub mod node;
 use crate::task::v2ray_task_config::*;
 use async_trait::async_trait;
 
+use config::get_port;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use regex::Regex;
@@ -67,8 +68,14 @@ pub trait V2rayService: Send + Sync + Clone + ConfigurableV2ray + 'static {
 
     fn get_host(&self) -> &str;
 
-    async fn get_proxy_url(&self, config: &str) -> Result<String> {
+    fn get_proxy_url(&self, config: &str) -> Result<String> {
         config::get_proxy_url(config, self.get_host())
+    }
+
+    async fn restart_in_background(&self, config: &str) -> Result<u32> {
+        let port = config::get_port(config)?;
+        self.stop(port).await?;
+        self.start_in_background(config).await
     }
 
     async fn clean_start_in_background(&self, config: &str) -> Result<()> {
@@ -345,8 +352,9 @@ impl ConfigurableV2ray for LocalV2ray {
                 log::trace!("loading config from path: {}", path);
                 fs::read_to_string(path)
             } else {
-                log::debug!("loading config from custom");
-                Ok(config::get_tcp_ping_config())
+                let config = config::get_tcp_ping_config();
+                log::trace!("loading config from custom: {}", config);
+                Ok(config)
             }
         })?;
         Ok(config)

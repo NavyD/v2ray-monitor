@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BinaryHeap, sync::Arc};
 
 use crate::{task::switch::*, v2ray::node::Node};
 
@@ -59,52 +59,53 @@ impl Filter<SwitchData, Vec<SwitchNodeStat>> for SwitchSelectFilter {
             max_count
         );
         selected.retain(|e| e.node.host == host);
+        log::trace!("{} of nodes left", selected.len());
+        if selected.is_empty() {
+            log::warn!("All nodes are filtered");
+        }
         selected
     }
 }
 
 pub struct NameRegexFilter {
-    name_regexs: Vec<Regex>,
+    name_regex: Regex,
 }
 
 impl NameRegexFilter {
-    pub fn new(name_regexs: &[String]) -> Self {
-        if name_regexs.is_empty() {
+    pub fn new(name_regex: &str) -> Self {
+        if name_regex.is_empty() {
             panic!("Empty name regexs");
         }
         Self {
-            name_regexs: name_regexs
-                .iter()
-                .map(|name_regex| {
-                    Regex::new(name_regex)
-                        .unwrap_or_else(|e| panic!("regex `{}` error: {}", name_regex, e))
-                })
-                .collect(),
+            name_regex: Regex::new(name_regex)
+                .unwrap_or_else(|e| panic!("regex `{}` error: {}", name_regex, e)),
         }
     }
 }
 
 impl Filter<Vec<Node>, Vec<Node>> for NameRegexFilter {
     fn filter(&self, mut data: Vec<Node>) -> Vec<Node> {
-        data.retain(|n| {
-            self.name_regexs
-                .iter()
-                .any(|re| re.is_match(n.remark.as_ref().unwrap()))
-        });
+        log::trace!("filtering data: {} by name regex: {}", data.len(), self.name_regex);
+        data.retain(|n| self.name_regex.is_match(n.remark.as_ref().unwrap()));
+        log::trace!("{} of nodes left", data.len());
+        if data.is_empty() {
+            log::warn!("All nodes are filtered");
+        }
         data
     }
 }
 
-impl Filter<SwitchData, ()> for NameRegexFilter {
-    fn filter(&self, data: SwitchData) {
-        let mut data = data.lock();
-        *data = data
+impl Filter<BinaryHeap<SwitchNodeStat>, BinaryHeap<SwitchNodeStat>> for NameRegexFilter {
+    fn filter(&self, mut data: BinaryHeap<SwitchNodeStat>) -> BinaryHeap<SwitchNodeStat> {
+        log::trace!("filtering data: {} by name regex: {}", data.len(), self.name_regex);
+        let data = data
             .drain()
-            .filter(|ns| {
-                self.name_regexs
-                    .iter()
-                    .any(|re| re.is_match(ns.node.remark.as_ref().unwrap()))
-            })
-            .collect()
+            .filter(|ns| self.name_regex.is_match(ns.node.remark.as_ref().unwrap()))
+            .collect::<BinaryHeap<SwitchNodeStat>>();
+        log::trace!("{} of nodes left", data.len());
+        if data.is_empty() {
+            log::warn!("All nodes are filtered");
+        }
+        data
     }
 }

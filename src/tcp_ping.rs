@@ -13,17 +13,8 @@ use std::{
 
 use anyhow::{anyhow, Result};
 
-use crate::v2ray::config;
-use async_trait::async_trait;
-use parking_lot::Mutex;
 use reqwest::{Client, Proxy};
-use tokio::{
-    fs::read_to_string,
-    io::*,
-    net::TcpListener,
-    process::{Child, Command},
-    sync::{mpsc::channel, Semaphore},
-};
+use tokio::sync::{mpsc::channel, Semaphore};
 
 #[derive(Debug, Eq, Clone)]
 pub struct TcpPingStatistic {
@@ -111,9 +102,9 @@ impl TcpPingStatistic {
 }
 
 pub async fn ping_batch11<'a, T: V2rayService + 'static>(
-    v2: T,
-    nodes: &[Node],
-    prop: PingProperty,
+    _v2: T,
+    _nodes: &[Node],
+    _prop: PingProperty,
 ) -> Result<(Vec<(&Node, TcpPingStatistic)>, Option<Vec<&Node>>)> {
     todo!()
 }
@@ -154,10 +145,10 @@ pub async fn ping_batch<'a, T: V2rayService + 'static>(
 
     drop(tx);
 
-    let (mut res, mut err_nodes) = (vec![], None);
+    let (mut nodes, mut err_nodes) = (vec![], None);
     while let Some((node, ps)) = rx.recv().await {
         match ps {
-            Ok(ps) => res.push((node, ps)),
+            Ok(ps) => nodes.push((node, ps)),
             Err(e) => {
                 log::warn!(
                     "ignored node name: {:?}, address: {:?}, for received error tcp ping: {}",
@@ -171,14 +162,14 @@ pub async fn ping_batch<'a, T: V2rayService + 'static>(
     }
     let exe_dura = Instant::now() - start;
     log::debug!(
-        "tcp ping {} nodes takes {:?}.  accessible nodes: {}, error nodes: {}",
+        "tcp ping {} nodes by {} v2ray takes {:?}.  accessible nodes: {}, error nodes: {}",
         size,
+        concurr_num,
         exe_dura,
-        res.len(),
+        nodes.len(),
         err_nodes.as_ref().map(|a| a.len()).unwrap_or(0)
     );
-    // Ok((res, err_nodes))
-    todo!()
+    Ok((nodes, err_nodes))
 }
 
 async fn ping_task<T: V2rayService>(
@@ -191,7 +182,7 @@ async fn ping_task<T: V2rayService>(
 
     let port = v2.get_available_port().await?;
     let config = v2.gen_ping_config(node, port).await?;
-    let proxy_url = v2.get_proxy_url(&config).await?;
+    let proxy_url = v2.get_proxy_url(&config)?;
     v2.start_in_background(&config).await?;
 
     let client = reqwest::Client::builder()
