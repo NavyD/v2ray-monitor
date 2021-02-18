@@ -1,7 +1,7 @@
 tcp_ping:
   ping_interval: 600s
-  # filter:
-  #   name_regex: "→香港"
+  filter:
+    name_regex: "→香港"
   ping:
     count: 3
     ping_url: https://www.google.com/gen_204
@@ -31,7 +31,7 @@ switch:
   check_timeout: 2s
   filter:
     lb_nodes_size: 3
-    name_regex: "→香港"
+    name_regex: "香港"
   retry:
     count: 6
     interval_algo:
@@ -51,3 +51,17 @@ v2ray:
     bin_path: /usr/bin/v2ray
   # local:
     # config_path: tests/data/local-v2-config.json
+jinkela:
+  client:
+    username: dhjnavyd@qq.com
+    password: ycDUKD9g@FS595v
+    base_url: https://jinkela.best
+    timeout: 5s
+  update_time: "01:00:00"
+  retry: 
+    count: 3
+    interval_algo:
+      type: Beb
+      min: 5s
+      max: 30min
+    # once_timeout: 5s

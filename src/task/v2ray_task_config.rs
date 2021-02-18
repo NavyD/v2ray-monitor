@@ -1,5 +1,6 @@
 use std::{fmt::Debug, time::Duration};
 
+use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
 
 use super::find_v2ray_bin_path;
@@ -48,6 +49,7 @@ pub struct V2rayTaskProperty {
     pub subscpt: SubscriptionTaskProperty,
     pub switch: SwitchTaskProperty,
     pub v2ray: V2rayProperty,
+    pub jinkela: Option<JinkelaCheckinTaskProperty>,
 }
 
 // ...
@@ -157,6 +159,72 @@ pub enum RetryIntevalAlgorithm {
 
 fn default_switch_limit() -> usize {
     3
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct JinkelaCheckinTaskProperty {
+    pub client: JinkelaClientProperty,
+
+    #[serde(with = "naivetime_format")]
+    pub update_time: NaiveTime,
+    pub retry: RetryProperty,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct JinkelaClientProperty {
+    pub username: String,
+    pub password: String,
+    pub base_url: String,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+}
+
+mod naivetime_format {
+    use chrono::NaiveTime;
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(date: &NaiveTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&date.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<NaiveTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<NaiveTime>().map_err(serde::de::Error::custom)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use anyhow::Result;
+
+        #[test]
+        fn basic() -> Result<()> {
+            let original = "01:00:00";
+            let naive_time = original.parse::<NaiveTime>()?;
+
+            #[derive(Deserialize)]
+            struct A {
+                #[serde(with = "self")]
+                update_time: NaiveTime,
+            }
+            let json_str = r#"
+            {
+                "update_time": "01:00:00"
+            }
+          "#;
+            let de_res = serde_json::from_str::<A>(json_str)?;
+            assert_eq!(de_res.update_time, naive_time);
+            assert_eq!(original, de_res.update_time.to_string());
+
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

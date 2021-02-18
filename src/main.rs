@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
         opt.config.to_str().unwrap()
     );
 
-    let task = V2rayTaskManager::from_path(opt.config).await?;
+    let mut task = V2rayTaskManager::from_path(opt.config).await?;
     task.run().await;
 
     loop {

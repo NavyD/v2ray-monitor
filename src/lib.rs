@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use task::{
+    jinkela_checkin::JinkelaCheckinTask,
     subscription::SubscriptionTask,
     switch::SwitchTask,
     tcp_ping::TcpPingTask,
@@ -9,6 +10,7 @@ use task::{
 };
 use tokio::{fs::read_to_string, sync::mpsc::channel};
 use v2ray::{LocalV2ray, SshV2ray};
+mod client;
 pub mod task;
 mod tcp_ping;
 pub mod v2ray;
@@ -34,7 +36,7 @@ impl V2rayTaskManager {
         Ok(Self::new(config))
     }
 
-    pub async fn run(&self) {
+    pub async fn run(&mut self) {
         // start subscription task
         let (nodes_tx, nodes_rx) = channel(1);
         let subscpt = self.prop.subscpt.clone();
@@ -84,5 +86,8 @@ impl V2rayTaskManager {
                 }
             };
         });
+
+        let jinkela = JinkelaCheckinTask::new(self.prop.jinkela.take().unwrap());
+        tokio::spawn(async move { jinkela.run().await.unwrap() });
     }
 }

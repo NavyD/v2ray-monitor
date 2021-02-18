@@ -1,15 +1,15 @@
-use std::{
-    future::Future,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
-};
-
+pub mod jinkela_checkin;
 pub mod subscription;
 pub mod switch;
 pub mod tcp_ping;
 pub mod v2ray_task_config;
 
 use anyhow::{anyhow, Result};
+use std::{
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
+};
 
 use chrono::{DateTime, Local, NaiveTime};
 
@@ -60,7 +60,7 @@ impl RetryService {
         };
         *retry
     }
-    
+
     /// 根据在func执行结果决定是否重新执行func
     ///
     /// 如果
