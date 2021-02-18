@@ -313,59 +313,59 @@ async fn check_networking(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
+// #[cfg(test)]
+// mod tests {
 
-    use crate::{
-        task::{
-            find_v2ray_bin_path,
-            v2ray_task_config::{LocalV2rayProperty, V2rayProperty},
-        },
-        v2ray::LocalV2ray,
-    };
+//     use crate::{
+//         task::{
+//             find_v2ray_bin_path,
+//             v2ray_task_config::{LocalV2rayProperty, V2rayProperty},
+//         },
+//         v2ray::LocalV2ray,
+//     };
 
-    use super::*;
+//     use super::*;
 
-    #[tokio::test]
-    async fn basic() -> Result<()> {
-        let prop = get_switch_prop()?;
-        let v2 = LocalV2ray::new(get_v2ray_prop()?.local);
-        let _task = SwitchTask::new(prop, v2);
+//     #[tokio::test]
+//     async fn basic() -> Result<()> {
+//         let prop = get_switch_prop()?;
+//         let v2 = LocalV2ray::new(get_v2ray_prop()?.local);
+//         let _task = SwitchTask::new(prop, v2);
 
-        // task.run().await?;
-        Ok(())
-    }
+//         // task.run().await?;
+//         Ok(())
+//     }
 
-    fn get_v2ray_prop() -> Result<V2rayProperty> {
-        let content = r#"
-ssh:
-    username: root
-    host: 192.168.93.2
-    config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
-    bin_path: /usr/bin/v2ray
-local:
-    config_path: tests/data/local-v2-config.json
-        "#;
-        serde_yaml::from_str::<V2rayProperty>(content).map_err(Into::into)
-    }
+//     fn get_v2ray_prop() -> Result<V2rayProperty> {
+//         let content = r#"
+// ssh:
+//     username: root
+//     host: 192.168.93.2
+//     config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
+//     bin_path: /usr/bin/v2ray
+// local:
+//     config_path: tests/data/local-v2-config.json
+//         "#;
+//         serde_yaml::from_str::<V2rayProperty>(content).map_err(Into::into)
+//     }
 
-    fn get_switch_prop() -> Result<SwitchTaskProperty> {
-        let content = r#"
-check_url: https://www.google.com/gen_204
-check_timeout: 2s
-filter:
-    lb_nodes_size: 3
-    name_regex: "→香港"
-retry:
-    count: 7
-    interval_algo:
-        type: "Beb"
-        min: "2s"
-        max: "40s"
-    half:
-        start: "02:00:00"
-        interval: 5h
-        "#;
-        serde_yaml::from_str::<SwitchTaskProperty>(content).map_err(Into::into)
-    }
-}
+//     fn get_switch_prop() -> Result<SwitchTaskProperty> {
+//         let content = r#"
+// check_url: https://www.google.com/gen_204
+// check_timeout: 2s
+// filter:
+//     lb_nodes_size: 3
+//     name_regex: "→香港"
+// retry:
+//     count: 7
+//     interval_algo:
+//         type: "Beb"
+//         min: "2s"
+//         max: "40s"
+//     half:
+//         start: "02:00:00"
+//         interval: 5h
+//         "#;
+//         serde_yaml::from_str::<SwitchTaskProperty>(content).map_err(Into::into)
+//     }
+// }

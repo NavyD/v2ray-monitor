@@ -1,6 +1,9 @@
 use std::{fmt::Debug, time::Duration};
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::v2ray::{ConfigurableV2ray, V2rayService};
 
 use super::find_v2ray_bin_path;
 
@@ -20,6 +23,8 @@ pub struct TcpPingTaskProperty {
     pub filter: TcpPingFilterProperty,
     pub retry_failed: RetryProperty,
     pub ping: PingProperty,
+    #[serde(default)]
+    pub v2_type: V2rayType,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -35,6 +40,8 @@ pub struct SwitchTaskProperty {
     pub check_timeout: Duration,
     pub retry: RetryProperty,
     pub filter: SwitchFilterProperty,
+    #[serde(default)]
+    pub v2_type: V2rayType,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -46,6 +53,17 @@ pub struct V2rayTaskProperty {
 }
 
 // ...
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum V2rayType {
+    Local,
+    Ssh,
+}
+
+impl Default for V2rayType {
+    fn default() -> Self {
+        Self::Local
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RetryProperty {
@@ -79,6 +97,15 @@ pub struct LocalV2rayProperty {
     pub config_path: Option<String>,
 }
 
+impl Default for LocalV2rayProperty {
+    fn default() -> Self {
+        LocalV2rayProperty {
+            bin_path: find_v2ray_bin_path().expect("not found v2ray in path"),
+            config_path: None,
+        }
+    }
+}
+
 fn default_local_v2ray_bin_path() -> String {
     find_v2ray_bin_path().expect("not found v2ray in path")
 }
@@ -105,7 +132,9 @@ pub struct PingProperty {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct V2rayProperty {
-    pub ssh: SshV2rayProperty,
+    #[serde(default)]
+    pub ssh: Option<SshV2rayProperty>,
+    #[serde(default)]
     pub local: LocalV2rayProperty,
 }
 

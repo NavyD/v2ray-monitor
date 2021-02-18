@@ -11,19 +11,19 @@ tcp_ping:
     count: 5
     interval_algo:
       type: Beb
-      min: 1s
+      min: 5s
       max: 60s
-  subscpt_path: tests/data/v2ray-subscription.txt
+  subscpt_path: v2ray-subscription.txt
 
 subscpt:
-  path: tests/data/v2ray-subscription.txt
+  path: v2ray-subscription.txt
   url: https://www.jinkela.site/link/ukWr5K49YjHIQGdL?sub=3
   update_interval: 12h
   retry_failed:
     count: 3
     interval_algo:
       type: Beb
-      min: 5min
+      min: 5s
       max: 30min
 
 switch:
@@ -49,5 +49,5 @@ v2ray:
     host: 192.168.93.2
     config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
     bin_path: /usr/bin/v2ray
-  local:
-    config_path: tests/data/local-v2-config.json
+  # local:
+    # config_path: tests/data/local-v2-config.json

@@ -92,10 +92,12 @@ async fn update_subscription(url: String, path: String, tx: Sender<Vec<Node>>) -
         path,
         contents.len()
     );
-    tokio::fs::write(path, &contents).await?;
-    log::trace!("parsing subscription data");
-    let nodes = parse_subscription_nodes(contents)?;
+
+    let nodes = parse_subscription_nodes(&contents)?;
     log::trace!("sending parsed nodes: {}", nodes.len());
     tx.send(nodes).await?;
+
+    tokio::fs::write(path, &contents).await?;
+    log::trace!("parsing subscription data");
     Ok(())
 }
