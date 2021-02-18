@@ -121,6 +121,64 @@ impl<V: V2rayService> SwitchTask<V> {
         }
     }
 
+    pub async fn run(&self, rx: Receiver<Vec<(Node, TcpPingStatistic)>>) -> Result<()> {
+        self.update_node_stats(rx).await?;
+        let retry_srv = RetryService::new(self.prop.retry.clone());
+
+        let switch = self.prop.clone();
+        self.v2.clean_env().await?;
+
+        let task = {
+            let proxy_url = self.v2.get_proxy_url(self.v2.get_config().await?)?;
+            let check_url = switch.check_url.clone();
+            let timeout = switch.check_timeout;
+            Arc::new(move || check_networking(check_url.clone(), timeout, proxy_url.clone()))
+        };
+        let (mut last_switched, mut last_duration, mut last_checked) =
+            (None::<Vec<SwitchNodeStat>>, None::<Duration>, false);
+        loop {
+            log::debug!("retrying check networking");
+            match retry_srv
+                .retry_on(task.clone().as_ref(), last_checked)
+                .await
+            {
+                Ok((retries, duration)) => {
+                    // 这次做成功时重试 后失败退出
+                    if last_checked {
+                        log::debug!(
+                            "Found network problems. Reconfirming the problem after checking {} times of {:?}",
+                            retries,
+                            duration
+                        );
+                        last_duration = Some(duration);
+                    }
+                    // 上次是失败时 这次是做失败时重试 后成功退出
+                    else {
+                        log::debug!("After {} retries and {:?}, it is checked that the network has recovered", retries, duration);
+                    }
+                }
+                // 重试次数达到max_retries
+                Err(e) => {
+                    if !last_checked {
+                        log::info!("trying to switch tangents, Confirm that there is a problem: {}, last_checked: {}, last_switched: {:?}, last_duration: {:?}", e, last_checked, last_switched, last_duration);
+                        let selected = self
+                            .switch(last_switched.take(), last_duration.take())
+                            .await?;
+                        log::debug!("Node switch succeeded: {:?}", selected);
+                        last_switched.replace(selected);
+                        continue;
+                    } else {
+                        log::debug!(
+                            "Check that a failure has occurred: {}, try again if it fails",
+                            e
+                        );
+                    }
+                }
+            }
+            last_checked = !last_checked;
+        }
+    }
+
     /// 更新node stats为SwitchNodeStat。首次调用将会等待数据可用，之后会在后台更新。
     async fn update_node_stats(
         &self,
@@ -199,6 +257,11 @@ impl<V: V2rayService> SwitchTask<V> {
             log::info!("selected nodes: {:?}", nodes_msg);
         }
 
+        if selected.is_empty() {
+            log::error!("Switch node error: no any nodes");
+            return Err(anyhow!("no any nodes"));
+        }
+
         // 切换节点
         let config = self
             .v2
@@ -216,72 +279,26 @@ impl<V: V2rayService> SwitchTask<V> {
 
         Ok(selected)
     }
-
-    pub async fn run(&self, rx: Receiver<Vec<(Node, TcpPingStatistic)>>) -> Result<()> {
-        self.update_node_stats(rx).await?;
-        let retry_srv = RetryService::new(self.prop.retry.clone());
-
-        let switch = self.prop.clone();
-        self.v2.clean_env().await?;
-
-        let task = {
-            let proxy_url = self.v2.get_proxy_url(self.v2.get_config().await?)?;
-            let check_url = switch.check_url.clone();
-            let timeout = switch.check_timeout;
-            Arc::new(move || check_networking_owned(check_url.clone(), timeout, proxy_url.clone()))
-        };
-        let (mut last_switched, mut last_duration, mut last_checked) =
-            (None::<Vec<SwitchNodeStat>>, None::<Duration>, false);
-        loop {
-            log::debug!("retrying check networking");
-            match retry_srv
-                .retry_on(task.clone().as_ref(), last_checked)
-                .await
-            {
-                Ok((retries, duration)) => {
-                    // 这次做成功时重试 后失败退出
-                    if last_checked {
-                        log::debug!(
-                            "Found network problems. Reconfirming the problem after checking {} times of {:?}",
-                            retries,
-                            duration
-                        );
-                        last_duration = Some(duration);
-                    }
-                    // 上次是失败时 这次是做失败时重试 后成功退出
-                    else {
-                        log::debug!("After {} retries and {:?}, it is checked that the network has recovered", retries, duration);
-                    }
-                }
-                // 重试次数达到max_retries
-                Err(e) => {
-                    if !last_checked {
-                        log::info!("trying to switch tangents, Confirm that there is a problem: {}, last_checked: {}, last_switched: {:?}, last_duration: {:?}", e, last_checked, last_switched, last_duration);
-                        let selected = self
-                            .switch(last_switched.take(), last_duration.take())
-                            .await?;
-                        log::debug!("Node switch succeeded: {:?}", selected);
-                        last_switched.replace(selected);
-                        // last_switched = Some(), Non;
-                        continue;
-                    } else {
-                        log::debug!(
-                            "Check that a failure has occurred: {}, try again if it fails",
-                            e
-                        );
-                    }
-                }
-            }
-            last_checked = !last_checked;
-        }
-    }
 }
 
-async fn check_networking_owned(url: String, timeout: Duration, proxy_url: String) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .proxy(Proxy::all(&proxy_url)?)
+async fn check_networking(
+    url: String,
+    timeout: Duration,
+    proxy_url: Option<String>,
+) -> Result<()> {
+    let client = proxy_url
+        .as_ref()
+        .map(|url| Proxy::all(url).map(|proxy| reqwest::Client::builder().proxy(proxy)))
+        .unwrap_or_else(|| Ok(reqwest::Client::builder()))?
         .timeout(timeout)
         .build()?;
+
+    log::trace!(
+        "Checking network url: {}, timeout: {:?}, proxy_url: {:?}",
+        url,
+        timeout,
+        proxy_url
+    );
     let start = Instant::now();
     let status = client.get(&url).send().await?.status();
     let elapsed = Instant::now() - start;
@@ -300,7 +317,10 @@ async fn check_networking_owned(url: String, timeout: Duration, proxy_url: Strin
 mod tests {
 
     use crate::{
-        task::{find_v2ray_bin_path, v2ray_task_config::LocalV2rayProperty},
+        task::{
+            find_v2ray_bin_path,
+            v2ray_task_config::{LocalV2rayProperty, V2rayProperty},
+        },
         v2ray::LocalV2ray,
     };
 
@@ -309,18 +329,24 @@ mod tests {
     #[tokio::test]
     async fn basic() -> Result<()> {
         let prop = get_switch_prop()?;
-        let v2 = LocalV2ray::new(prop.local.clone());
+        let v2 = LocalV2ray::new(get_v2ray_prop()?.local);
         let _task = SwitchTask::new(prop, v2);
 
         // task.run().await?;
         Ok(())
     }
 
-    fn get_local_prop() -> Result<LocalV2rayProperty> {
-        Ok(LocalV2rayProperty {
-            bin_path: find_v2ray_bin_path()?,
-            config_path: Some("tests/data/local-v2-config.json".to_string()),
-        })
+    fn get_v2ray_prop() -> Result<V2rayProperty> {
+        let content = r#"
+ssh:
+    username: root
+    host: 192.168.93.2
+    config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
+    bin_path: /usr/bin/v2ray
+local:
+    config_path: tests/data/local-v2-config.json
+        "#;
+        serde_yaml::from_str::<V2rayProperty>(content).map_err(Into::into)
     }
 
     fn get_switch_prop() -> Result<SwitchTaskProperty> {
@@ -339,14 +365,6 @@ retry:
     half:
         start: "02:00:00"
         interval: 5h
-ssh:
-    username: root
-    host: 192.168.93.2
-    config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
-    bin_path: /usr/bin/v2ray
-local:
-    config_path: tests/data/local-v2-config.json
-    
         "#;
         serde_yaml::from_str::<SwitchTaskProperty>(content).map_err(Into::into)
     }

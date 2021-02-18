@@ -54,8 +54,8 @@ pub trait V2rayService: Send + Sync + Clone + ConfigurableV2ray + 'static {
 
     fn get_host(&self) -> &str;
 
-    fn get_proxy_url(&self, config: &str) -> Result<String> {
-        config::get_proxy_url(config, self.get_host())
+    fn get_proxy_url(&self, config: &str) -> Result<Option<String>> {
+        config::get_proxy_url(config, self.get_host()).map(Some)
     }
 
     async fn restart_in_background(&self, config: &str) -> Result<u32> {
@@ -199,10 +199,13 @@ impl V2rayService for SshV2ray {
 
     async fn stop(&self, port: u16) -> Result<()> {
         // 可以在background时读取进程id保存，然后ssh kill
-        let pid = self.port_pids.lock().get(&port).copied();
+        let pid = self.port_pids.lock().remove(&port);
         if let Some(pid) = pid {
-            self.ssh_exe(&format!("kill -9 {}", pid)).await?;
-            log::debug!("successfully kill v2ray process id: {}", pid);
+            if let Err(e) = self.ssh_exe(&format!("kill -9 {}", pid)).await {
+                log::info!("stop v2ray {} failed: {}", pid, e);
+            } else {
+                log::debug!("successfully kill v2ray process id: {}", pid);
+            }
         }
         Ok(())
     }
@@ -311,6 +314,11 @@ impl V2rayService for SshV2ray {
             Some(pp.keys().copied().collect())
         }
     }
+
+    /// 使用路由全局自动代理
+    fn get_proxy_url(&self, config: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -339,7 +347,7 @@ impl ConfigurableV2ray for LocalV2ray {
                 fs::read_to_string(path)
             } else {
                 let config = config::get_tcp_ping_config();
-                log::trace!("loading config from custom: {}", config);
+                log::trace!("loading config from custom");
                 Ok(config)
             }
         })?;

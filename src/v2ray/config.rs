@@ -112,13 +112,12 @@ pub fn get_proxy_url(config: &str, host: &str) -> Result<String> {
 }
 
 fn get_proxy_url_from_value(value: &Value, host: &str) -> Result<String> {
-    let mut prot = get(value, "inbound.protocol")?
+    let prot = get(value, "inbound.protocol")?
         .as_str()
         .map(ToString::to_string)
         .ok_or_else(|| anyhow!("not found protocol"))?;
-    let prot = if prot == "socks" {
-        prot.push('5');
-        prot
+    let prot = if prot.contains("socks") || prot.eq_ignore_ascii_case("dokodemo-door") {
+        "socks5".to_string()
     } else if prot.contains("http") {
         prot
     } else {

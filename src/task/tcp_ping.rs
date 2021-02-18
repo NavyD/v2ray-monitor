@@ -27,11 +27,6 @@ pub struct TcpPingTask<V: V2rayService> {
 
 impl<V: V2rayService> TcpPingTask<V> {
     pub fn new(prop: TcpPingTaskProperty, v2: V) -> Self {
-        // let pre_filter = prop
-        //     .filter
-        //     .name_regex
-        //     .clone()
-        //     .map(|s| Arc::new(Box::new(NameRegexFilter::new(vec![s]))));
         Self {
             v2,
             nodes: Arc::new(Mutex::new(vec![])),
@@ -53,7 +48,7 @@ impl<V: V2rayService> TcpPingTask<V> {
             .ok_or_else(|| anyhow!("receive nodes error"))?;
         let pre_filter = self.pre_filter.clone();
         let nodes = self.nodes.clone();
-        *nodes.lock() = if let Some(f) = pre_filter {
+        *nodes.lock() = if let Some(f) = pre_filter.as_ref() {
             f.filter(recv_nodes)
         } else {
             recv_nodes
@@ -61,9 +56,11 @@ impl<V: V2rayService> TcpPingTask<V> {
         tokio::spawn(async move {
             while let Some(recv_nodes) = rx.recv().await {
                 log::debug!("processing received nodes: {}", recv_nodes.len());
-                // *nodes.lock() = pre_filter
-                //     .map(|f| f.filter(recv_nodes))
-                //     .unwrap_or(recv_nodes);
+                *nodes.lock() = if let Some(f) = pre_filter.as_ref() {
+                    f.filter(recv_nodes)
+                } else {
+                    recv_nodes
+                };
             }
         });
         Ok(())

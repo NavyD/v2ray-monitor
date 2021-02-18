@@ -1,18 +1,18 @@
 tcp_ping:
-  ping_interval: 10s
+  ping_interval: 600s
   filter:
-    node_name_regex: "test"
+    name_regex: "→香港"
   ping:
     count: 3
     ping_url: https://www.google.com/gen_204
     timeout: 1s 500ms
     concurr_num: 10
   retry_failed:
-    count: 3
+    count: 5
     interval_algo:
-      type: "Beb"
-      min: "1s"
-      max: "60s"
+      type: Beb
+      min: 1s
+      max: 60s
   subscpt_path: tests/data/v2ray-subscription.txt
 
 subscpt:
@@ -22,9 +22,9 @@ subscpt:
   retry_failed:
     count: 3
     interval_algo:
-      type: "Beb"
-      min: "5s"
-      max: "30s"
+      type: Beb
+      min: 5min
+      max: 30min
 
 switch:
   check_url: https://www.google.com/gen_204
@@ -33,14 +33,16 @@ switch:
     lb_nodes_size: 3
     name_regex: "→香港"
   retry:
-    count: 7
+    count: 6
     interval_algo:
-      type: "Beb"
-      min: "2s"
-      max: "40s"
+      type: SwitchBeb
+      min: 200ms
+      max: 30s
+      switch_limit: 5
     half:
       start: "01:00:00"
       interval: 5h
+v2ray:
   ssh:
     username: root
     host: 192.168.93.2

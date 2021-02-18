@@ -35,8 +35,6 @@ pub struct SwitchTaskProperty {
     pub check_timeout: Duration,
     pub retry: RetryProperty,
     pub filter: SwitchFilterProperty,
-    pub ssh: SshV2rayProperty,
-    pub local: LocalV2rayProperty,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -44,6 +42,7 @@ pub struct V2rayTaskProperty {
     pub tcp_ping: TcpPingTaskProperty,
     pub subscpt: SubscriptionTaskProperty,
     pub switch: SwitchTaskProperty,
+    pub v2ray: V2rayProperty,
 }
 
 // ...
@@ -102,6 +101,12 @@ pub struct PingProperty {
     /// 表示v2ray并发tcp ping节点时的数量。默认为cpu数量
     #[serde(default = "num_cpus::get")]
     pub concurr_num: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct V2rayProperty {
+    pub ssh: SshV2rayProperty,
+    pub local: LocalV2rayProperty,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

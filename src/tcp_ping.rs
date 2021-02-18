@@ -173,16 +173,19 @@ async fn ping_task<T: V2rayService>(
     let proxy_url = v2.get_proxy_url(&config)?;
     v2.start_in_background(&config).await?;
 
-    let client = reqwest::Client::builder()
+    let client = proxy_url
+        .as_ref()
+        .map(|url| Proxy::all(url).map(|proxy| reqwest::Client::builder().proxy(proxy)))
+        .unwrap_or_else(|| Ok(reqwest::Client::builder()))?
         .timeout(timeout)
-        .proxy(Proxy::all(&proxy_url)?)
         .build()?;
 
     let (tx, mut rx) = channel(count.into());
     log::trace!(
-        "calculating the ping data of node: {:?}, addr: {:?}",
+        "calculating the ping data of node: {:?}, addr: {:?} by proxy: {:?}",
         node.remark,
-        node.add
+        node.add,
+        proxy_url
     );
     let start = Instant::now();
     for i in 0..count {

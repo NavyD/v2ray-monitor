@@ -4,12 +4,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-pub mod filter;
 pub mod subscription;
 pub mod switch;
 pub mod tcp_ping;
 pub mod v2ray_task_config;
-pub mod v2ray_tasks;
 
 use anyhow::{anyhow, Result};
 
@@ -62,18 +60,7 @@ impl RetryService {
         };
         *retry
     }
-
-    // fn retry_count_incr(&self, ok_or_err: bool) -> usize {
-    //     let mut stat = self.stat.lock();
-    //     let retry = if ok_or_err {
-    //         &mut stat.success_count
-    //     } else {
-    //         &mut stat.failed_count
-    //     };
-    //     *retry += 1;
-    //     *retry
-    // }
-
+    
     /// 根据在func执行结果决定是否重新执行func
     ///
     /// 如果
@@ -131,18 +118,17 @@ impl RetryService {
             sleep(cur_interval).await;
         }
         let d = Instant::now() - start;
-        let retry_count = self.retry_count(ok_or_err);
         log::debug!(
             "Retry on {} and exit after {} retries, it takes {:?}",
             name,
-            retry_count,
+            cur_retries,
             d
         );
         // 在错误重试时 成功退出没有问题了 重置failed count
         if !ok_or_err {
             self.stat.lock().failed_count = 0;
         }
-        Ok((retry_count, d))
+        Ok((cur_retries, d))
     }
 
     async fn is_retried<F, Fut>(&self, func: Arc<F>, ok_or_err: bool) -> bool
@@ -260,6 +246,14 @@ impl RetryIntevalAlgorithm {
                 }
                 // switch切换
                 if switch_limit * retry.prop.count <= retry.stat.lock().failed_count {
+                    if log::log_enabled!(log::Level::Debug) {
+                        log::debug!(
+                            "Trigger switch limit: {}, retry count: {}, failed count: {}",
+                            switch_limit,
+                            retry.prop.count,
+                            retry.stat.lock().failed_count
+                        );
+                    }
                     return max;
                 }
 
@@ -276,125 +270,260 @@ impl RetryIntevalAlgorithm {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
+mod filter {
+    use std::collections::BinaryHeap;
 
-//     #[test]
-//     fn find_v2ray_bin_path_test() -> Result<()> {
-//         let path = find_bin_path("v2ray")?;
-//         assert!(path.contains("v2ray"));
-//         Ok(())
-//     }
+    use regex::Regex;
 
-//     #[test]
-//     fn not_found_bin_path() {
-//         assert!(find_bin_path("__no_exist_v2ray_").is_err());
-//     }
+    use crate::v2ray::node::Node;
 
-//     #[tokio::test]
-//     async fn retry_timeout() -> Result<()> {
-//         async fn task() -> Result<()> {
-//             let d = Duration::from_secs(1);
-//             sleep(d).await;
-//             Err(anyhow!("test error for sleep {:?}", d))
-//         }
-//         let mut prop = get_retry_prop()?;
-//         prop.once_timeout = Some(Duration::from_millis(10000));
-//         let retry = RetryService::new(prop);
-//         assert!(retry.retry_on(Arc::new(task), false).await.is_err());
-//         Ok(())
-//     }
+    use super::{
+        switch::{SwitchData, SwitchNodeStat},
+        *,
+    };
 
-//     #[tokio::test]
-//     async fn retry_half() -> Result<()> {
-//         async fn task() -> Result<()> {
-//             let d = Duration::from_secs(1);
-//             sleep(d).await;
-//             Err(anyhow!("test error for sleep {:?}", d))
-//         }
-//         let mut prop = get_retry_prop()?;
-//         let mut half = prop.half.as_mut().unwrap();
-//         let min = Duration::from_millis(100);
-//         let max = Duration::from_millis(500);
-//         prop.count = 2;
-//         half.start = Local::now().format("%H:%M:%S").to_string();
-//         prop.interval_algo = RetryIntevalAlgorithm::Beb { min, max };
+    pub trait Filter<T, R>: Send + Sync {
+        fn filter(&self, data: T) -> R;
 
-//         let retry = RetryService::new(prop);
-//         let task = Arc::new(task);
-//         let out = timeout(max * 2, retry.retry_on(task,false)).await;
-//         assert!(out.is_err());
+        fn name(&self) -> &str {
+            std::any::type_name::<Self>()
+        }
+    }
+    #[derive(Clone)]
+    pub struct FilterManager<T, R> {
+        filters: Arc<Vec<Box<dyn Filter<T, R>>>>,
+    }
 
-//         let mut prop = get_retry_prop()?;
-//         let mut half = prop.half.as_mut().unwrap();
-//         half.start = (Local::now() + chrono::Duration::from_std(max * 10)?).to_string();
+    pub struct SwitchSelectFilter {
+        size: usize,
+    }
 
-//         let retry = RetryService::new(prop);
-//         let out = timeout(max * 4, retry.retry_on(task, false)).await;
-//         assert!(out.is_ok());
-//         assert!(out.unwrap().is_err());
-//         Ok(())
-//     }
+    impl SwitchSelectFilter {
+        pub fn new(size: usize) -> Self {
+            Self { size }
+        }
+    }
 
-//     #[tokio::test]
-//     async fn half_during_execution() -> Result<()> {
-//         async fn task() -> Result<()> {
-//             let d = Duration::from_millis(500);
-//             sleep(d).await;
-//             Err(anyhow!("test error for sleep {:?}", d))
-//         }
-//         let mut prop = get_retry_prop()?;
-//         let mut half = prop.half.as_mut().unwrap();
-//         let min = Duration::from_millis(100);
-//         let max = Duration::from_millis(500);
-//         prop.count = 2;
-//         half.start = (Local::now() + chrono::Duration::from_std(max * 10)?)
-//             .format("%H:%M:%S")
-//             .to_string();
-//         prop.interval_algo = RetryIntevalAlgorithm::Beb { min, max };
+    impl Filter<SwitchData, Vec<SwitchNodeStat>> for SwitchSelectFilter {
+        fn filter(&self, data: SwitchData) -> Vec<SwitchNodeStat> {
+            let mut val = data.lock();
+            let mut selected = vec![];
+            if val.is_empty() {
+                log::warn!("No data was found during filtering");
+                return selected;
+            }
+            for _ in 0..self.size {
+                if let Some(v) = val.pop() {
+                    selected.push(v);
+                }
+            }
+            if self.size == 1 {
+                return selected;
+            }
 
-//         let retry = RetryService::new(prop);
-//         let task = Arc::new(task);
-//         let out = timeout(max * 2, retry.retry_on(task,false)).await;
-//         assert!(out.is_err());
+            let mut max_count = 1;
+            let mut host = selected.first().unwrap().node.host.clone();
+            for ns1 in &selected {
+                let mut count = 0;
+                for ns2 in &selected {
+                    if ns1.node.host == ns2.node.host {
+                        count += 1;
+                    }
+                }
+                if max_count < count {
+                    host = ns1.node.host.clone();
+                    max_count = count;
+                }
+            }
+            log::debug!(
+                "selected load balance host: {:?}, count: {}",
+                host,
+                max_count
+            );
+            selected.retain(|e| e.node.host == host);
+            log::trace!("{} of nodes left", selected.len());
+            if selected.is_empty() {
+                log::warn!("All nodes are filtered");
+            }
+            selected
+        }
 
-//         Ok(())
-//     }
+        fn name(&self) -> &str {
+            std::any::type_name::<Self>()
+        }
+    }
 
-//     #[tokio::test]
-//     async fn get_half_durationtest() -> Result<()> {
-//         let interval = Duration::from_secs(10);
-//         // now .. start 不休眠
-//         let mut start = SystemTime::now() + interval / 2;
-//         let half = get_half_duration(&mut start, interval)?;
-//         assert!(half.is_none());
+    pub struct NameRegexFilter {
+        name_regex: Regex,
+    }
 
-//         // start .. now .. end 休眠 end - now
-//         let mut start = SystemTime::now() - interval / 2;
-//         let half = get_half_duration(&mut start, interval)?;
-//         assert!(half.is_some());
-//         assert!(half < Some(interval));
+    impl NameRegexFilter {
+        pub fn new(name_regex: &str) -> Self {
+            if name_regex.is_empty() {
+                panic!("Empty name regexs");
+            }
+            Self {
+                name_regex: Regex::new(name_regex)
+                    .unwrap_or_else(|e| panic!("regex `{}` error: {}", name_regex, e)),
+            }
+        }
+    }
 
-//         // start..end .. now 不休眠 改变start为下一天
-//         let mut start = SystemTime::now() - interval * 2;
-//         let half = get_half_duration(&mut start, interval)?;
-//         assert!(half.is_none());
-//         assert!(start > SystemTime::now() + Duration::from_secs(60 * 60 * 23));
-//         Ok(())
-//     }
+    impl Filter<Vec<Node>, Vec<Node>> for NameRegexFilter {
+        fn filter(&self, mut data: Vec<Node>) -> Vec<Node> {
+            log::debug!(
+                "filtering data: {} by name regex: {}",
+                data.len(),
+                self.name_regex
+            );
+            data.retain(|n| self.name_regex.is_match(n.remark.as_ref().unwrap()));
+            log::debug!("{} of nodes left", data.len());
+            if data.is_empty() {
+                log::warn!("All nodes are filtered");
+            }
+            data
+        }
+    }
 
-//     fn get_retry_prop() -> Result<RetryProperty> {
-//         let content = r#"
-// retry:
-// count: 3
-// interval_algo:
-//     type: Beb
-//     min: 100ms
-//     max: 2s
-// half:
-//     start: "02:00:00"
-//     interval: 6h"#;
-//         serde_yaml::from_str::<RetryProperty>(content).map_err(Into::into)
-//     }
-// }
+    impl Filter<BinaryHeap<SwitchNodeStat>, BinaryHeap<SwitchNodeStat>> for NameRegexFilter {
+        fn filter(&self, mut data: BinaryHeap<SwitchNodeStat>) -> BinaryHeap<SwitchNodeStat> {
+            log::debug!(
+                "filtering data: {} by name regex: {}",
+                data.len(),
+                self.name_regex
+            );
+            let data = data
+                .drain()
+                .filter(|ns| self.name_regex.is_match(ns.node.remark.as_ref().unwrap()))
+                .collect::<BinaryHeap<SwitchNodeStat>>();
+            log::debug!("{} of nodes left", data.len());
+            if data.is_empty() {
+                log::warn!("All nodes are filtered");
+            }
+            data
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_v2ray_bin_path_test() -> Result<()> {
+        let path = find_bin_path("v2ray")?;
+        assert!(path.contains("v2ray"));
+        Ok(())
+    }
+
+    #[test]
+    fn not_found_bin_path() {
+        assert!(find_bin_path("__no_exist_v2ray_").is_err());
+    }
+
+    #[tokio::test]
+    async fn retry_timeout() -> Result<()> {
+        async fn task() -> Result<()> {
+            let d = Duration::from_secs(1);
+            sleep(d).await;
+            Err(anyhow!("test error for sleep {:?}", d))
+        }
+        let mut prop = get_retry_prop()?;
+        prop.once_timeout = Some(Duration::from_millis(10000));
+        let retry = RetryService::new(prop);
+        assert!(retry.retry_on(task, false).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_half() -> Result<()> {
+        async fn task() -> Result<()> {
+            let d = Duration::from_secs(1);
+            sleep(d).await;
+            Err(anyhow!("test error for sleep {:?}", d))
+        }
+        let mut prop = get_retry_prop()?;
+        let mut half = prop.half.as_mut().unwrap();
+        let min = Duration::from_millis(100);
+        let max = Duration::from_millis(500);
+        prop.count = 2;
+        half.start = Local::now().format("%H:%M:%S").to_string();
+        prop.interval_algo = RetryIntevalAlgorithm::Beb { min, max };
+
+        let retry = RetryService::new(prop);
+        let task = task;
+        let out = timeout(max * 2, retry.retry_on(task, false)).await;
+        assert!(out.is_err());
+
+        let mut prop = get_retry_prop()?;
+        let mut half = prop.half.as_mut().unwrap();
+        half.start = (Local::now() + chrono::Duration::from_std(max * 10)?).to_string();
+
+        let retry = RetryService::new(prop);
+        let out = timeout(max * 4, retry.retry_on(task, false)).await;
+        assert!(out.is_ok());
+        assert!(out.unwrap().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn half_during_execution() -> Result<()> {
+        async fn task() -> Result<()> {
+            let d = Duration::from_millis(500);
+            sleep(d).await;
+            Err(anyhow!("test error for sleep {:?}", d))
+        }
+        let mut prop = get_retry_prop()?;
+        let mut half = prop.half.as_mut().unwrap();
+        let min = Duration::from_millis(100);
+        let max = Duration::from_millis(500);
+        prop.count = 2;
+        half.start = (Local::now() + chrono::Duration::from_std(max * 10)?)
+            .format("%H:%M:%S")
+            .to_string();
+        prop.interval_algo = RetryIntevalAlgorithm::Beb { min, max };
+
+        let retry = RetryService::new(prop);
+        let task = task;
+        let out = timeout(max * 2, retry.retry_on(task, false)).await;
+        assert!(out.is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_half_durationtest() -> Result<()> {
+        let interval = Duration::from_secs(10);
+        // now .. start 不休眠
+        let mut start = SystemTime::now() + interval / 2;
+        let half = get_or_mod_start_half_duration(&mut start, interval)?;
+        assert!(half.is_none());
+
+        // start .. now .. end 休眠 end - now
+        let mut start = SystemTime::now() - interval / 2;
+        let half = get_or_mod_start_half_duration(&mut start, interval)?;
+        assert!(half.is_some());
+        assert!(half < Some(interval));
+
+        // start..end .. now 不休眠 改变start为下一天
+        let mut start = SystemTime::now() - interval * 2;
+        let half = get_or_mod_start_half_duration(&mut start, interval)?;
+        assert!(half.is_none());
+        assert!(start > SystemTime::now() + Duration::from_secs(60 * 60 * 23));
+        Ok(())
+    }
+
+    fn get_retry_prop() -> Result<RetryProperty> {
+        let content = r#"
+retry:
+count: 3
+interval_algo:
+    type: Beb
+    min: 100ms
+    max: 2s
+half:
+    start: "02:00:00"
+    interval: 6h"#;
+        serde_yaml::from_str::<RetryProperty>(content).map_err(Into::into)
+    }
+}
