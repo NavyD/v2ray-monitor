@@ -1,7 +1,7 @@
 tcp_ping:
   ping_interval: 600s
-  filter:
-    name_regex: "→香港"
+  # filter:
+  #   name_regex: "→香港"
   ping:
     count: 3
     ping_url: https://www.google.com/gen_204

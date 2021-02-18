@@ -316,7 +316,7 @@ impl V2rayService for SshV2ray {
     }
 
     /// 使用路由全局自动代理
-    fn get_proxy_url(&self, config: &str) -> Result<Option<String>> {
+    fn get_proxy_url(&self, _config: &str) -> Result<Option<String>> {
         Ok(None)
     }
 }

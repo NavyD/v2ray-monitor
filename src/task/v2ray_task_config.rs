@@ -1,9 +1,6 @@
 use std::{fmt::Debug, time::Duration};
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-
-use crate::v2ray::{ConfigurableV2ray, V2rayService};
 
 use super::find_v2ray_bin_path;
 
@@ -20,6 +17,7 @@ pub struct SubscriptionTaskProperty {
 pub struct TcpPingTaskProperty {
     #[serde(with = "humantime_serde")]
     pub ping_interval: Duration,
+    #[serde(default)]
     pub filter: TcpPingFilterProperty,
     pub retry_failed: RetryProperty,
     pub ping: PingProperty,
@@ -82,7 +80,7 @@ pub struct RetryHalfProperty {
     pub interval: Duration,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TcpPingFilterProperty {
     #[serde(default)]
     pub name_regex: Option<String>,
