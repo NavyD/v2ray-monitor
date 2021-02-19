@@ -65,28 +65,31 @@ impl PartialEq for SwitchNodeStat {
 
 impl std::cmp::Ord for SwitchNodeStat {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let r = self.weight().cmp(&other.weight());
-        if r != Ordering::Equal {
-            return r;
-        }
-        if self.node == other.node {
-            return Ordering::Equal;
-        }
+        fn cmptest(this: &SwitchNodeStat, other: &SwitchNodeStat) -> std::cmp::Ordering {
+            let r = this.weight().cmp(&other.weight());
+            if r != Ordering::Equal {
+                return r;
+            }
+            if this.node == other.node {
+                return Ordering::Equal;
+            }
 
-        let compare = |a: Option<Duration>, b: Option<Duration>| match (a, b) {
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (a, b) => a.cmp(&b),
-        };
-        let v = compare(self.tcp_stat.rtt_avg, other.tcp_stat.rtt_avg);
-        if v != Ordering::Equal {
-            return v;
+            let compare = |a: Option<Duration>, b: Option<Duration>| match (a, b) {
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (a, b) => a.cmp(&b),
+            };
+            let v = compare(this.tcp_stat.rtt_avg, other.tcp_stat.rtt_avg);
+            if v != Ordering::Equal {
+                return v;
+            }
+            let v = compare(this.tcp_stat.rtt_min, other.tcp_stat.rtt_min);
+            if v != Ordering::Equal {
+                return v;
+            }
+            compare(this.tcp_stat.rtt_max, other.tcp_stat.rtt_max)
         }
-        let v = compare(self.tcp_stat.rtt_min, other.tcp_stat.rtt_min);
-        if v != Ordering::Equal {
-            return v;
-        }
-        compare(self.tcp_stat.rtt_max, other.tcp_stat.rtt_max)
+        cmptest(self, other).reverse()
     }
 }
 
@@ -281,11 +284,7 @@ impl<V: V2rayService> SwitchTask<V> {
     }
 }
 
-async fn check_networking(
-    url: String,
-    timeout: Duration,
-    proxy_url: Option<String>,
-) -> Result<()> {
+async fn check_networking(url: String, timeout: Duration, proxy_url: Option<String>) -> Result<()> {
     let client = proxy_url
         .as_ref()
         .map(|url| Proxy::all(url).map(|proxy| reqwest::Client::builder().proxy(proxy)))
