@@ -24,17 +24,20 @@ impl JinkelaCheckinTask {
     pub async fn run(&self) -> Result<()> {
         let mut update_time = Local::today().and_time(self.prop.update_time).unwrap();
         loop {
-            log::info!("The checkin task of jinkela is in progress. update time: {}", update_time);
+            log::debug!(
+                "The checkin task of jinkela is in progress. update time: {}",
+                update_time
+            );
             let client = self.client.clone();
             client.login().await?;
-
+            log::trace!("jinkela login successful");
             match self
                 .retry_srv
                 .retry_on(move || task(client.clone()), false)
                 .await
             {
                 Ok((retries, duration)) => {
-                    log::debug!(
+                    log::info!(
                         "Check in task succeeded. retries: {}, duration: {:?}",
                         retries,
                         duration
@@ -44,14 +47,15 @@ impl JinkelaCheckinTask {
                     log::error!("Check in task failed: {}", e);
                 }
             }
-
             sleep_on(&mut update_time).await?;
         }
     }
 }
 
+const DAY: Duration = Duration::from_secs(60 * 60 * 24);
+
 async fn sleep_on(update_time: &mut DateTime<Local>) -> Result<()> {
-    let day = Duration::from_secs(60 * 60 * 24);
+    let day = DAY;
 
     let now = Local::now();
     let duration = if now < *update_time {
@@ -59,15 +63,14 @@ async fn sleep_on(update_time: &mut DateTime<Local>) -> Result<()> {
     } else {
         now - *update_time
     };
-    log::info!(
+    log::debug!(
         "jinkela checkin task sleeping {} on update time {}",
         duration,
         *update_time
     );
     sleep(duration.to_std()?).await;
-
     *update_time = *update_time + chrono::Duration::from_std(day)?;
-    log::debug!("update update_time: {}", *update_time);
+    log::trace!("next update_time: {}", *update_time);
     Ok(())
 }
 
@@ -87,13 +90,46 @@ async fn task(client: JinkelaClient) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::time::timeout;
+
     use super::*;
 
     #[tokio::test]
     async fn basic() -> Result<()> {
         let prop = get_prop()?;
         let task = JinkelaCheckinTask::new(prop);
-        task.run().await?;
+        let res = timeout(Duration::from_secs(2), task.run()).await;
+        assert!(res.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sleep_test() -> Result<()> {
+        let offset = Duration::from_millis(200);
+        let small_offset = Duration::from_millis(100);
+
+        // sleep要休眠offset 少给超时
+        let mut update_time = Local::now() - chrono::Duration::from_std(offset)?;
+        assert!(timeout(offset - small_offset, sleep_on(&mut update_time))
+            .await
+            .is_err());
+
+        // sleep要休眠offset 多给超时
+        let mut update_time = Local::now() - chrono::Duration::from_std(offset)?;
+        let next_time = update_time + chrono::Duration::from_std(DAY)?;
+        assert!(timeout(offset + small_offset, sleep_on(&mut update_time))
+            .await
+            .is_ok());
+        assert_eq!(update_time, next_time);
+
+        // 上次更新的update_time
+        let next_time = update_time + chrono::Duration::from_std(DAY)?;
+        assert!(timeout(offset + small_offset, sleep_on(&mut update_time))
+            .await
+            .is_err());
+        assert_eq!(update_time + chrono::Duration::from_std(DAY)?, next_time);
+        // let res = timeout(offset + offset, sleep_on(&mut update_time)).await;
+
         Ok(())
     }
 

@@ -42,9 +42,11 @@ impl JinkelaClient {
         let resp = self.client.post(&url).form(&form).send().await?;
         let status = resp.status();
         if !status.is_success() {
+            let headers = resp.headers().clone();
             log::error!(
-                "Login failed. status: {}, body: {}",
+                "Login failed. status: {}, headers: {:?}, body: {}",
                 status,
+                headers,
                 resp.text().await?
             );
             return Err(anyhow!("Login failed. status: {}", status));
@@ -84,26 +86,16 @@ impl JinkelaClient {
         let resp = self.client.post(&url).send().await?;
         let status = resp.status();
         if !status.is_success() {
+            let headers = resp.headers().clone();
             log::error!(
-                "checkin failed. status: {}, body: {}",
+                "checkin failed. status: {}, headers: {:?}, body: {}",
                 status,
+                headers,
                 resp.text().await?
             );
             return Err(anyhow!("Login failed. status: {}", status));
         }
-        let body = resp.json::<ResultInfo>().await?;
-
-        if body.ret == 0 {
-            log::debug!("checkin failed ret: {}, msg: {}", body.ret, body.msg);
-        } else {
-            log::debug!(
-                "checkin successful msg: {}, traffic: {:?}",
-                body.msg,
-                body.traffic_info
-            );
-        }
-
-        Ok(body)
+        resp.json::<ResultInfo>().await.map_err(Into::into)
     }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -131,7 +123,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn basic() -> Result<()> {
+    async fn login_test() -> Result<()> {
+        let prop = get_prop()?;
+        let client = JinkelaClient::new(prop);
+        client.login().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkin_test() -> Result<()> {
         let prop = get_prop()?;
         let client = JinkelaClient::new(prop);
         client.login().await?;
@@ -140,7 +140,6 @@ mod tests {
             (info.ret == 0 && info.traffic_info.is_none())
                 || (info.ret == 1 && info.traffic_info.is_some())
         );
-
         Ok(())
     }
 
