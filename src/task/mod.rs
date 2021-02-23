@@ -304,8 +304,8 @@ mod filter {
         }
     }
 
-    impl Filter<SwitchData, Vec<SwitchNodeStat>> for SwitchSelectFilter {
-        fn filter(&self, data: SwitchData) -> Vec<SwitchNodeStat> {
+    impl Filter<SwitchData, Vec<Node>> for SwitchSelectFilter {
+        fn filter(&self, data: SwitchData) -> Vec<Node> {
             let mut val = data.lock();
             let mut selected = vec![];
             if val.is_empty() {

@@ -61,7 +61,7 @@ async fn load_from_local(subscpt: &SubscriptionTaskProperty, tx: &Sender<Vec<Nod
         // 读取节点
         let mut contents = String::new();
         file.read_to_string(&mut contents).await?;
-        let nodes = parse_subscription_nodes(contents)?;
+        let nodes = parse_subx_nodes(contents)?;
         log::trace!("sending parsed nodes: {}", nodes.len());
         tx.send(nodes).await?;
 
@@ -93,7 +93,7 @@ async fn update_subscription(url: String, path: String, tx: Sender<Vec<Node>>) -
         contents.len()
     );
 
-    let nodes = parse_subscription_nodes(&contents)?;
+    let nodes = parse_subx_nodes(&contents)?;
     log::trace!("sending parsed nodes: {}", nodes.len());
     tx.send(nodes).await?;
 

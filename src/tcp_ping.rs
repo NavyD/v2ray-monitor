@@ -138,7 +138,7 @@ pub async fn ping_batch<'a, T: V2rayService + 'static>(
         match ps {
             Ok(ps) => nodes.push((node, ps)),
             Err(e) => {
-                log::warn!(
+                log::debug!(
                     "ignored node name: {:?}, address: {:?}, for received error tcp ping: {}",
                     node.remark,
                     node.add,
@@ -149,7 +149,7 @@ pub async fn ping_batch<'a, T: V2rayService + 'static>(
         }
     }
     let exe_dura = Instant::now() - start;
-    log::debug!(
+    log::info!(
         "tcp ping {} nodes by {} v2ray takes {:?}.  accessible nodes: {}, error nodes: {}",
         size,
         concurr_num,
@@ -197,7 +197,7 @@ async fn ping_task<T: V2rayService>(
                 .await
                 .map(|d| (i, Some(d)))
                 .unwrap_or_else(|e| {
-                    log::debug!("not found duration error: {}", e);
+                    log::trace!("not found duration error: {}", e);
                     (i, None)
                 });
             tx.send(idx_dura)
@@ -210,7 +210,7 @@ async fn ping_task<T: V2rayService>(
 
     log::trace!("waiting for measure duration {} tasks", count);
     while let Some((i, du)) = rx.recv().await {
-        log::trace!("received task result: ({}, {:?})", i, du);
+        log::trace!("received ping result: ({}, {:?}) for node {:?}", i, du, node.remark);
         durations[i as usize] = du;
     }
     let exe_dura = Instant::now() - start;

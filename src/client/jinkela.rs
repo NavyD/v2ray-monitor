@@ -41,7 +41,16 @@ impl JinkelaClient {
         log::trace!("Signing in to jinkela url: {}, body form: {:?}", url, form);
         let resp = self.client.post(&url).form(&form).send().await?;
         let status = resp.status();
-        if !status.is_success() {
+        if status.is_redirection() {
+            let req = self.client.post(&url).form(&form).build()?;
+            let headers = resp.headers().clone();
+            log::warn!(
+                "reqeust {:?}, login may have failed. status: {}, headers: {:?}",
+                req,
+                status,
+                headers,
+            );
+        } else if !status.is_success() {
             let headers = resp.headers().clone();
             log::error!(
                 "Login failed. status: {}, headers: {:?}, body: {}",

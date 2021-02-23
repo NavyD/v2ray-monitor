@@ -28,10 +28,11 @@ pub struct Node {
 
 pub async fn load_subscription_nodes_from_file<T: AsRef<Path>>(path: T) -> Result<Vec<Node>> {
     let buf = tokio::fs::read(path).await?;
-    parse_subscription_nodes(buf)
+    parse_subx_nodes(buf)
 }
 
-pub fn parse_subscription_nodes<T: AsRef<[u8]>>(buf: T) -> Result<Vec<Node>> {
+/// 解析标准的订阅文件
+pub fn parse_subx_nodes<T: AsRef<[u8]>>(buf: T) -> Result<Vec<Node>> {
     let buf = buf.as_ref();
     base64::decode(buf)?
         .split(|byte| *byte == b'\n')
@@ -40,14 +41,17 @@ pub fn parse_subscription_nodes<T: AsRef<[u8]>>(buf: T) -> Result<Vec<Node>> {
         .collect()
 }
 
-pub fn parse_node<T: AsRef<[u8]>>(buf: T) -> Result<Node> {
+/// 解析标准的vmess链接为node 
+/// 
+/// 如：`vmess://eyJob3N0IjoiaGtibi52ZHMubmJzZC51cyIsInBhdGgiOiIvaGxzIiwidGxzIjoiIiwidmVyaWZ5X2NlcnQiOnRydWUsImFkZCI6ImlwbGMwNS5jbmNtLmxheTE2OC5uZXQiLCJwb3J0Ijo5MDIxLCJhaWQiOjIsIm5ldCI6IndzIiwiaGVhZGVyVHlwZSI6Im5vbmUiLCJ2IjoiMiIsInR5cGUiOiJ2bWVzcyIsInBzIjoi57Kk5rivMDMgSUVQTOS4k+e6vyDlhaXlj6M1IHwgNHggTkYiLCJyZW1hcmsiOiLnsqTmuK8wMyBJRVBM5LiT57q/IOWFpeWPozUgfCA0eCBORiIsImlkIjoiNTVmYjA0NTctZDg3NC0zMmMzLTg5YTItNjc5ZmVkNmVhYmYxIiwiY2xhc3MiOjF9`
+pub fn parse_node<T: AsRef<[u8]>>(link: T) -> Result<Node> {
     const PREFIX: &str = "vmess://";
-    let buf = buf.as_ref();
+    let buf = link.as_ref();
     if !buf.starts_with(PREFIX.as_bytes()) {
         return Err(anyhow!(
-            "only supported prefix: {:?}, cur: {:?}",
-            PREFIX.as_bytes(),
-            &buf[..PREFIX.len()]
+            "only supported prefix: `{}`, cur: `{}`",
+            PREFIX,
+            String::from_utf8(buf[..PREFIX.len()].to_vec())?
         ));
     }
     let buf = base64::decode(&buf[PREFIX.len()..])?;
@@ -99,7 +103,7 @@ mod node_tests {
     fn parse_subscription_nodes_test() -> Result<()> {
         // 双重encode
         let buf = r#"dm1lc3M6Ly9leUpvYjNOMElqb2ljblV3Tmk1cWFDNXVZbk5rTG5Weklpd2ljR0YwYUNJNklpOW9iSE1pTENKMGJITWlPaUlpTENKMlpYSnBabmxmWTJWeWRDSTZkSEoxWlN3aVlXUmtJam9pWVdndVkyNWpkUzVzWVhreE5qZ3VibVYwSWl3aWNHOXlkQ0k2TmpFd05EUXNJbUZwWkNJNk1pd2libVYwSWpvaWQzTWlMQ0pvWldGa1pYSlVlWEJsSWpvaWJtOXVaU0lzSW14dlkyRnNjMlZ5ZG1WeUlqb2ljblV3Tmk1cWFDNXVZbk5rTG5Weklpd2lkaUk2SWpJaUxDSjBlWEJsSWpvaWRtMWxjM01pTENKd2N5STZJdVd1aWVXK3ZlS0drdVMvaE9lOWwrYVdyekEySUh3Z01TNHplQ0lzSW5KbGJXRnlheUk2SXVXdWllVyt2ZUtHa3VTL2hPZTlsK2FXcnpBMklId2dNUzR6ZUNJc0ltbGtJam9pTlRWbVlqQTBOVGN0WkRnM05DMHpNbU16TFRnNVlUSXROamM1Wm1Wa05tVmhZbVl4SWl3aVkyeGhjM01pT2pGOQp2bWVzczovL2V5Sm9iM04wSWpvaWNuVXdOUzVxYUM1dVluTmtMblZ6SWl3aWNHRjBhQ0k2SWk5b2JITWlMQ0owYkhNaU9pSWlMQ0oyWlhKcFpubGZZMlZ5ZENJNmRISjFaU3dpWVdSa0lqb2lZV2d1WTI1amRTNXNZWGt4TmpndWJtVjBJaXdpY0c5eWRDSTZOakV3TkRJc0ltRnBaQ0k2TWl3aWJtVjBJam9pZDNNaUxDSm9aV0ZrWlhKVWVYQmxJam9pYm05dVpTSXNJbXh2WTJGc2MyVnlkbVZ5SWpvaWNuVXdOUzVxYUM1dVluTmtMblZ6SWl3aWRpSTZJaklpTENKMGVYQmxJam9pZG0xbGMzTWlMQ0p3Y3lJNkl1V3VpZVcrdmVLR2t1Uy9oT2U5bCthV3J6QTFJSHdnTVM0emVGeDBJaXdpY21WdFlYSnJJam9pNWE2SjViNjk0b2FTNUwrRTU3Mlg1cGF2TURVZ2ZDQXhMak40WEhRaUxDSnBaQ0k2SWpVMVptSXdORFUzTFdRNE56UXRNekpqTXkwNE9XRXlMVFkzT1dabFpEWmxZV0ptTVNJc0ltTnNZWE56SWpveGZRPT0="#;
-        let nodes = parse_subscription_nodes(buf)?;
+        let nodes = parse_subx_nodes(buf)?;
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].host, Some("ru06.jh.nbsd.us".to_owned()));
         assert_eq!(nodes[1].host, Some("ru05.jh.nbsd.us".to_owned()));
