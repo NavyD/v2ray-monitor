@@ -1,8 +1,6 @@
 use std::{
-    borrow::Borrow,
     cmp::Ordering,
     collections::BinaryHeap,
-    ops::Deref,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -13,10 +11,9 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 
-use once_cell::sync::{Lazy, OnceCell};
 use parking_lot::Mutex;
-use reqwest::{Client, Proxy};
-use tokio::{sync::mpsc::Receiver, task::JoinHandle};
+use reqwest::Proxy;
+use tokio::sync::mpsc::Receiver;
 
 use super::{
     filter::{Filter, *},
@@ -382,16 +379,14 @@ async fn switch_nodes<'a>(
 #[cfg(test)]
 mod tests {
 
-    use std::{fs::read_to_string, future::Future, task::Context, thread};
-
-    use futures::future;
-    use tokio::{runtime::Handle, sync::mpsc::channel, time::{sleep, timeout}};
+    use once_cell::sync::{Lazy, OnceCell};
+    use tokio::{
+        sync::mpsc::channel,
+        time::{sleep, timeout},
+    };
 
     use crate::{
-        task::{
-            find_v2ray_bin_path,
-            v2ray_task_config::{LocalV2rayProperty, PingProperty, V2rayProperty},
-        },
+        task::v2ray_task_config::{PingProperty, V2rayProperty},
         tcp_ping,
         v2ray::{node, LocalV2ray},
     };

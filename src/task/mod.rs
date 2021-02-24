@@ -353,7 +353,7 @@ mod filter {
                 }
             }
             log::trace!("selected node host: {:?}, count: {}", host, max_count);
-            nodes
+            nodes.into_iter().filter(|node| node.host == host).collect()
         }
 
         fn name(&self) -> &str {
