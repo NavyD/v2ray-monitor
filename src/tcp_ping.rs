@@ -210,7 +210,12 @@ async fn ping_task<T: V2rayService>(
 
     log::trace!("waiting for measure duration {} tasks", count);
     while let Some((i, du)) = rx.recv().await {
-        log::trace!("received ping result: ({}, {:?}) for node {:?}", i, du, node.remark);
+        log::trace!(
+            "received ping result: ({}, {:?}) for node {:?}",
+            i,
+            du,
+            node.remark
+        );
         durations[i as usize] = du;
     }
     let exe_dura = Instant::now() - start;

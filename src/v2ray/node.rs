@@ -41,8 +41,8 @@ pub fn parse_subx_nodes<T: AsRef<[u8]>>(buf: T) -> Result<Vec<Node>> {
         .collect()
 }
 
-/// 解析标准的vmess链接为node 
-/// 
+/// 解析标准的vmess链接为node
+///
 /// 如：`vmess://eyJob3N0IjoiaGtibi52ZHMubmJzZC51cyIsInBhdGgiOiIvaGxzIiwidGxzIjoiIiwidmVyaWZ5X2NlcnQiOnRydWUsImFkZCI6ImlwbGMwNS5jbmNtLmxheTE2OC5uZXQiLCJwb3J0Ijo5MDIxLCJhaWQiOjIsIm5ldCI6IndzIiwiaGVhZGVyVHlwZSI6Im5vbmUiLCJ2IjoiMiIsInR5cGUiOiJ2bWVzcyIsInBzIjoi57Kk5rivMDMgSUVQTOS4k+e6vyDlhaXlj6M1IHwgNHggTkYiLCJyZW1hcmsiOiLnsqTmuK8wMyBJRVBM5LiT57q/IOWFpeWPozUgfCA0eCBORiIsImlkIjoiNTVmYjA0NTctZDg3NC0zMmMzLTg5YTItNjc5ZmVkNmVhYmYxIiwiY2xhc3MiOjF9`
 pub fn parse_node<T: AsRef<[u8]>>(link: T) -> Result<Node> {
     const PREFIX: &str = "vmess://";

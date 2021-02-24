@@ -25,15 +25,12 @@ impl JinkelaCheckinTask {
         let mut update_time = Local::today().and_time(self.prop.update_time).unwrap();
         loop {
             log::debug!(
-                "The checkin task of jinkela is in progress. update time: {}",
+                "starting jinkela checkin task. update time: {}",
                 update_time
             );
-            let client = self.client.clone();
-            client.login().await?;
-            log::trace!("jinkela login successful");
             match self
                 .retry_srv
-                .retry_on(move || task(client.clone()), false)
+                .retry_on(move || task(self.client.clone()), false)
                 .await
             {
                 Ok((retries, duration)) => {
@@ -75,6 +72,7 @@ async fn sleep_on(update_time: &mut DateTime<Local>) -> Result<()> {
 }
 
 async fn task(client: JinkelaClient) -> Result<()> {
+    client.login().await?;
     let body = client.checkin().await?;
     if body.ret == 0 {
         log::warn!("checkin failed ret: {}, msg: {}", body.ret, body.msg);

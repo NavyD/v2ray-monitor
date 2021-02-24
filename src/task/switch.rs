@@ -51,7 +51,7 @@ impl SwitchNodeStat {
             if total == 0 {
                 return avg;
             }
-            avg * total
+            avg * (total + 1)
         } else {
             std::usize::MAX
         }
@@ -103,12 +103,12 @@ impl std::cmp::PartialOrd for SwitchNodeStat {
 }
 
 pub type SwitchData = Arc<Mutex<BinaryHeap<SwitchNodeStat>>>;
-type SelectFilter = Arc<Box<dyn Filter<SwitchData, Vec<SwitchNodeStat>>>>;
+
 pub struct SwitchTask<V: V2rayService> {
     stats: SwitchData,
     v2: V,
     pre_filter: Option<Arc<NameRegexFilter>>,
-    select_filter: SelectFilter,
+    select_filter: Arc<SwitchSelectFilter>,
     prop: SwitchTaskProperty,
 }
 
@@ -122,13 +122,12 @@ impl<V: V2rayService> SwitchTask<V> {
                 .name_regex
                 .as_ref()
                 .map(|s| Arc::new(NameRegexFilter::new(s))),
-            select_filter: Arc::new(Box::new(SwitchSelectFilter::new(
-                prop.filter.lb_nodes_size.into(),
-            ))),
+            select_filter: Arc::new(SwitchSelectFilter::new(prop.filter.lb_nodes_size.into())),
             prop,
         }
     }
 
+    /// 等待首次接收node stats数据并启动后台切换任务
     pub async fn run(&self, rx: Receiver<Vec<(Node, TcpPingStatistic)>>) -> Result<()> {
         self.update_node_stats(rx).await?;
 
@@ -148,7 +147,7 @@ impl<V: V2rayService> SwitchTask<V> {
         v2.clean_env().await?;
         tokio::spawn(async move {
             let (mut last_switched, mut last_duration, mut last_checked) =
-                (None::<Vec<SwitchNodeStat>>, None::<Duration>, false);
+                (None::<Vec<Node>>, None::<Duration>, false);
 
             loop {
                 log::debug!("retrying check networking");
@@ -174,20 +173,38 @@ impl<V: V2rayService> SwitchTask<V> {
                     // 重试次数达到max_retries
                     Err(e) => {
                         if !last_checked {
-                            log::info!("trying to switch tangents, Confirm that there is a problem: {}, last_checked: {}, last_switched: {:?}, last_duration: {:?}", e, last_checked, last_switched, last_duration);
-                            
-                            if let Err(e) = switch_node(
-                                &stats.clone(),
-                                select_filter.clone(),
-                                &v2,
+                            log::debug!("trying to switch tangents, Confirm that there is a problem: {}, last_checked: {:?}, last_switched: {:?}, last_duration: {:?}", 
+                                e,
+                                last_checked,
+                                last_switched,
+                                last_duration,
+                            );
+                            // switch node
+                            // 将上次切换的节点重入 stats 权重排序
+                            if let Err(e) = repush_last(
+                                stats.clone(),
                                 last_switched.take(),
                                 last_duration.take(),
-                            )
-                            .await
-                            {
-                                log::debug!("Node switch succeeded: {:?}", selected);
-                            } else {
-                                continue;
+                            ) {
+                                log::warn!("switch last error: {}", e);
+                            }
+                            match switch_nodes(&v2, stats.clone(), &select_filter).await {
+                                Ok(nodes) => {
+                                    if log::log_enabled!(log::Level::Info) {
+                                        log::info!(
+                                            "Node switch succeeded: {:?}",
+                                            nodes
+                                                .iter()
+                                                .map(|n| n.remark.as_ref())
+                                                .collect::<Vec<_>>()
+                                        );
+                                    }
+                                    last_switched.replace(nodes);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    log::error!("switch error: {}", e);
+                                }
                             }
                         } else {
                             log::debug!(
@@ -250,22 +267,18 @@ impl<V: V2rayService> SwitchTask<V> {
     }
 }
 
-static CHECK_CLIENT: OnceCell<Client> = OnceCell::new();
-
 async fn check_networking(url: String, timeout: Duration, proxy_url: Option<String>) -> Result<()> {
-    let client = CHECK_CLIENT.get_or_try_init(|| {
-        log::trace!(
-            "Initializing the check networking client with timeout: {:?}, proxy: {:?}",
-            timeout,
-            proxy_url
-        );
+    log::trace!(
+        "Initializing the check networking client with timeout: {:?}, proxy: {:?}",
+        timeout,
         proxy_url
-            .as_ref()
-            .map(|url| Proxy::all(url).map(|proxy| reqwest::Client::builder().proxy(proxy)))
-            .unwrap_or_else(|| Ok(reqwest::Client::builder()))?
-            .timeout(timeout)
-            .build()
-    })?;
+    );
+    let client = proxy_url
+        .as_ref()
+        .map(|url| Proxy::all(url).map(|proxy| reqwest::Client::builder().proxy(proxy)))
+        .unwrap_or_else(|| Ok(reqwest::Client::builder()))?
+        .timeout(timeout)
+        .build()?;
     log::trace!(
         "Checking network url: {}, timeout: {:?}, proxy_url: {:?}",
         url,
@@ -276,7 +289,11 @@ async fn check_networking(url: String, timeout: Duration, proxy_url: Option<Stri
     let status = client.get(&url).send().await?.status();
     let elapsed = Instant::now() - start;
     if !status.is_success() {
-        log::info!("switch checking got exception status: {}", status);
+        log::info!(
+            "switch checking got exception status: {} for get request url: {}",
+            status,
+            url
+        );
     }
     log::trace!(
         "Check the network {} successfully consumption: {:?}",
@@ -286,64 +303,80 @@ async fn check_networking(url: String, timeout: Duration, proxy_url: Option<Stri
     Ok(())
 }
 
-/// 
-async fn switch_node<'a>(
-    stats: &'a SwitchData,
-    select_filter: SelectFilter,
-    v2: &'a impl V2rayService,
-    last_switched: &mut Option<Vec<SwitchNodeStat>>,
-    last_dura: &mut Option<Duration>,
+/// 将last_switched中的nodes结合last_duration重入stats中使节点重排序
+fn repush_last(
+    stats: SwitchData,
+    last_switched: Option<Vec<Node>>,
+    last_duration: Option<Duration>,
 ) -> Result<()> {
-    // 将上次切换的节点重入 stats 权重排序
-    if let Some(last) = last_switched {
-        log::debug!("repush for last switched nodes size: {}", last.len());
+    if let Some(mut last) = last_switched {
+        log::trace!(
+            "repush for last switched nodes size: {}, last duration: {:?}",
+            last.len(),
+            last_duration
+        );
+        let last_duration = last_duration.ok_or_else(|| {
+            anyhow!(
+                "last duration: None is not consistent with last switched value: {:?}",
+                last
+            )
+        })?;
         let mut stats = stats.lock();
-        for mut stat in last {
-            log::trace!(
-                "repush node {:?}, old service duration: {:?}, cur switch duration: {:?}",
-                stat.node.remark,
-                stat.serv_duras,
-                last_dura
-            );
-            stat.push_serv_duration(last_dura);
-            stats.push(stat);
-        }
-    }
+        let mut temp = vec![];
+        while let Some(mut ns) = stats.pop() {
+            if last.is_empty() {
+                stats.push(ns);
+                break;
+            }
+            if let Some(idx) =
+                last.iter()
+                    .enumerate()
+                    .find_map(|(i, n)| if n == &ns.node { Some(i) } else { None })
+            {
+                ns.serv_duras.push(Some(last_duration));
+                temp.push(ns);
 
-    // 从stats中取出节点
-    let selected = select_filter.filter(stats.clone());
-    if selected.is_empty() {
+                last.remove(idx);
+            } else {
+                log::error!(
+                    "not found switch node {:?} in last switched: {:?}",
+                    ns.node.remark.as_ref(),
+                    last.iter().map(|n| n.remark.as_ref()).collect::<Vec<_>>()
+                );
+                return Err(anyhow!("not found node in last switched"));
+            }
+        }
+
+        temp.into_iter().for_each(|ns| stats.push(ns));
+    }
+    Ok(())
+}
+
+///
+async fn switch_nodes<'a>(
+    v2: &'a impl V2rayService,
+    stats: SwitchData,
+    select_filter: &'a SwitchSelectFilter,
+) -> Result<Vec<Node>> {
+    let nodes = select_filter.filter(stats.clone());
+    if nodes.is_empty() {
         log::error!("Switch node error: no any nodes");
         return Err(anyhow!("no any nodes"));
     }
 
     // 切换节点
-    let config = v2
-        .gen_config(
-            &selected
+    let config = v2.gen_config(&nodes.iter().collect::<Vec<_>>()).await?;
+    if log::log_enabled!(log::Level::Trace) {
+        log::trace!(
+            "switching nodes with {:?}",
+            nodes
                 .iter()
-                .map(|s| s.node.clone())
+                .map(|node| node.remark.as_ref())
                 .collect::<Vec<_>>()
-                .iter()
-                .collect::<Vec<_>>(),
-        )
-        .await?;
-
-    v2.restart_in_background(&config).await?;
-
-    if log::log_enabled!(log::Level::Info) {
-        let nodes_msg = selected
-            .iter()
-            .map(|v| (v.node.remark.as_ref(), v.tcp_stat.rtt_avg.as_ref()))
-            .collect::<Vec<_>>();
-        log::info!("selected nodes: {:?}", nodes_msg);
+        );
     }
-
-    last_switched.replace(selected);
-    
-    let mut stats = stats.lock();
-    selected.into_iter().for_each(|n| stats.push(n));
-    Ok(())
+    v2.restart_in_background(&config).await?;
+    Ok(nodes)
 }
 
 #[cfg(test)]
@@ -352,7 +385,7 @@ mod tests {
     use std::{fs::read_to_string, future::Future, task::Context, thread};
 
     use futures::future;
-    use tokio::{runtime::Handle, sync::mpsc::channel, time::timeout};
+    use tokio::{runtime::Handle, sync::mpsc::channel, time::{sleep, timeout}};
 
     use crate::{
         task::{
@@ -369,6 +402,7 @@ mod tests {
     use crate::v2ray::ConfigurableV2ray;
 
     #[tokio::test]
+    // #[ignore]
     async fn check_network_timeout_after_v2_startup() -> Result<()> {
         let mut node = get_node_stats()
             .await?
@@ -403,11 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_network_normal_after_v2_startup() -> Result<()> {
-        let node = get_node_stats()
-            .await?
-            .first()
-            .map(|n| n.0.clone())
-            .unwrap();
+        let node = get_node_stats().await?.last().map(|n| n.0.clone()).unwrap();
         let v2 = V2.clone();
         let config = v2
             .gen_ping_config(&node, v2.get_available_port().await?)
@@ -422,7 +452,6 @@ mod tests {
             v2.get_proxy_url(&config)?,
         )
         .await?;
-
         Ok(())
     }
 
@@ -439,13 +468,73 @@ mod tests {
     #[tokio::test]
     async fn switch_normal_nodes() -> Result<()> {
         let task = get_updated_task().await?;
-        switch_node(
-            &task.stats,
-            task.select_filter.clone(),
-            &V2.clone(),
-            None,
-            None,
-        ).await?;
+        let switch = get_switch_prop()?;
+        let res = check_networking(
+            switch.check_url.clone(),
+            switch.check_timeout,
+            task.v2.get_proxy_url(task.v2.get_config().await?)?,
+        )
+        .await;
+        assert!(res.is_err());
+
+        let nodes = switch_nodes(&task.v2, task.stats.clone(), &task.select_filter).await?;
+        assert!(!nodes.is_empty(), "switched nodes has empty");
+        let res = check_networking(
+            switch.check_url,
+            switch.check_timeout,
+            task.v2.get_proxy_url(task.v2.get_config().await?)?,
+        )
+        .await;
+        assert!(res.is_ok());
+        task.v2.stop_all().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_weight_after_repush() -> Result<()> {
+        let task = get_updated_task().await?;
+        let old_len = task.stats.lock().len();
+        assert!(old_len >= 2);
+        let first_node = task.stats.lock().peek().unwrap().clone();
+        let last_switched = Some(vec![first_node.node.clone()]);
+        let last_duration = Some(Duration::from_millis(100));
+        let res = repush_last(task.stats.clone(), last_switched, last_duration);
+        assert!(res.is_ok());
+        // 不修改数量
+        assert_eq!(task.stats.lock().len(), old_len);
+        // 修改weight
+        let updated_first = task
+            .stats
+            .lock()
+            .iter()
+            .find(|ns| ns.node == first_node.node)
+            .cloned()
+            .unwrap();
+        assert_ne!(updated_first.weight(), first_node.weight());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn run_test() -> Result<()> {
+        let (stats_tx, stats_rx) = channel(1);
+        let switch = get_switch_prop()?;
+        let nodes = get_node_stats().await?;
+
+        let task = SwitchTask::new(switch, V2.clone());
+        assert!(task.stats.lock().is_empty());
+
+        stats_tx.send(nodes.to_vec()).await?;
+        task.run(stats_rx).await?;
+        sleep(Duration::from_secs(4)).await;
+
+        check_networking(
+            task.prop.check_url.clone(),
+            task.prop.check_timeout,
+            task.v2.get_proxy_url(task.v2.get_config().await?)?,
+        )
+        .await?;
+        task.v2.stop_all().await?;
         Ok(())
     }
 
@@ -475,11 +564,6 @@ mod tests {
         assert!(nodes.len() > 1, "accessible node len: {}", nodes.len());
         *ns = nodes;
         Ok(ns.to_vec())
-    }
-
-    fn get_node() -> Node {
-        let link = "vmess://eyJob3N0IjoiaGt0MDEucHFzLXZkcy5sYXkxNjgubmV0IiwicGF0aCI6Ii9obHMiLCJ0bHMiOiIiLCJ2ZXJpZnlfY2VydCI6dHJ1ZSwiYWRkIjoiZ3owMi5tb2JpbGUubGF5MTY4Lm5ldCIsInBvcnQiOjYxMDMzLCJhaWQiOjIsIm5ldCI6IndzIiwiaGVhZGVyVHlwZSI6Im5vbmUiLCJsb2NhbHNlcnZlciI6ImhrdDAxLnBxcy12ZHMubGF5MTY4Lm5ldCIsInYiOiIyIiwidHlwZSI6InZtZXNzIiwicHMiOiLlub/lt54wMuKGkummmea4r0hLVDAxIHwgMS41eCDljp/nlJ8iLCJyZW1hcmsiOiLlub/lt54wMuKGkummmea4r0hLVDAxIHwgMS41eCDljp/nlJ8iLCJpZCI6IjU1ZmIwNDU3LWQ4NzQtMzJjMy04OWEyLTY3OWZlZDZlYWJmMSIsImNsYXNzIjoxfQ==";
-        node::parse_node(link).unwrap()
     }
 
     async fn get_nodes() -> Result<Vec<Node>> {
@@ -531,8 +615,8 @@ retry:
     count: 7
     interval_algo:
         type: "Beb"
-        min: "2s"
-        max: "40s"
+        min: "10ms"
+        max: "3s"
     half:
         start: "02:00:00"
         interval: 5h

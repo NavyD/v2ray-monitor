@@ -146,7 +146,7 @@ impl RetryService {
         };
 
         if let Err(e) = &res {
-            log::debug!("an error occurred while retrying execution: {}", e);
+            log::debug!("retrying execution error: {}", e);
         }
         (ok_or_err && res.is_ok()) || (!ok_or_err && res.is_err())
     }
@@ -219,7 +219,6 @@ impl RetryIntevalAlgorithm {
         use self::RetryIntevalAlgorithm::*;
         match *self {
             Beb { min, max } => Box::new(move |last: Duration| {
-                log::debug!("{}", retry.prop.count);
                 let next = last + last;
                 if next < min {
                     min
@@ -305,47 +304,56 @@ mod filter {
     }
 
     impl Filter<SwitchData, Vec<Node>> for SwitchSelectFilter {
+        /// 从data中找出最多size个相同host的节点，不会影响data的元素数量，clone出新的节点
         fn filter(&self, data: SwitchData) -> Vec<Node> {
-            let mut val = data.lock();
-            let mut selected = vec![];
-            if val.is_empty() {
-                log::warn!("No data was found during filtering");
-                return selected;
-            }
-            for _ in 0..self.size {
-                if let Some(v) = val.pop() {
-                    selected.push(v);
+            let nodes = {
+                let mut selected = vec![];
+                let mut nodes = vec![];
+                let mut val = data.lock();
+                if val.is_empty() {
+                    log::warn!("No data was found during filtering");
+                    return nodes;
                 }
-            }
+                log::trace!("selecting {} nodes in data len: {}", self.size, val.len());
+
+                // 找出size个节点
+                for _ in 0..self.size {
+                    if let Some(v) = val.pop() {
+                        log::debug!(
+                            "selected node: {:?}, tcp ping rtt avg: {:?}, service durations: {:?}",
+                            v.node.remark,
+                            v.tcp_stat.rtt_avg,
+                            v.serv_duras
+                        );
+                        nodes.push(v.node.clone());
+                        selected.push(v);
+                    }
+                }
+                selected.into_iter().for_each(|ns| val.push(ns));
+                nodes
+            };
+
             if self.size == 1 {
-                return selected;
+                return nodes;
             }
 
+            // 从size个节点中选出host相同的节点集合
             let mut max_count = 1;
-            let mut host = selected.first().unwrap().node.host.clone();
-            for ns1 in &selected {
+            let mut host = nodes.first().unwrap().host.clone();
+            for n1 in &nodes {
                 let mut count = 0;
-                for ns2 in &selected {
-                    if ns1.node.host == ns2.node.host {
+                for n2 in &nodes {
+                    if n1.host == n2.host {
                         count += 1;
                     }
                 }
                 if max_count < count {
-                    host = ns1.node.host.clone();
+                    host = n1.host.clone();
                     max_count = count;
                 }
             }
-            log::debug!(
-                "selected load balance host: {:?}, count: {}",
-                host,
-                max_count
-            );
-            selected.retain(|e| e.node.host == host);
-            log::trace!("{} of nodes left", selected.len());
-            if selected.is_empty() {
-                log::warn!("All nodes are filtered");
-            }
-            selected
+            log::trace!("selected node host: {:?}, count: {}", host, max_count);
+            nodes
         }
 
         fn name(&self) -> &str {
