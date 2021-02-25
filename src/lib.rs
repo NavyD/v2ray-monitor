@@ -1,7 +1,8 @@
-use std::path::Path;
+use std::{net::IpAddr, path::Path};
 
 use anyhow::Result;
 use task::{
+    check_network,
     jinkela_checkin::JinkelaCheckinTask,
     subscription::SubscriptionTask,
     switch::SwitchTask,
@@ -66,6 +67,19 @@ impl V2rayTaskManager {
             };
         });
 
+        let (ips_tx, ips_rx) = channel::<Vec<IpAddr>>(1);
+        let dns_task = check_network::DnsFlushTask::new(self.prop.dns.take().unwrap());
+        tokio::spawn(async move {
+            dns_task.run(ips_tx).await.unwrap();
+        });
+
+        let (switch_tx, switch_rx) = channel::<()>(1);
+        let check_task =
+            check_network::CheckNetworkTask::new(self.prop.check.take().unwrap());
+        tokio::spawn(async move {
+            check_task.run(ips_rx, switch_tx).await.unwrap();
+        });
+
         // start switch task
         let local_v2 = self.local_v2.clone();
         let ssh_v2 = self.ssh_v2.clone();
@@ -74,13 +88,13 @@ impl V2rayTaskManager {
             match &switch_prop.v2_type {
                 V2rayType::Local => {
                     SwitchTask::new(switch_prop, local_v2.clone())
-                        .run(stats_rx)
+                        .run(stats_rx, switch_rx)
                         .await
                         .unwrap();
                 }
                 V2rayType::Ssh => {
                     SwitchTask::new(switch_prop, ssh_v2.clone().expect("not found v2ray ssh"))
-                        .run(stats_rx)
+                        .run(stats_rx, switch_rx)
                         .await
                         .unwrap();
                 }

@@ -51,6 +51,7 @@ v2ray:
     bin_path: /usr/bin/v2ray
   local:
     config_path: tests/data/local-v2-config.json
+    bin_path: /home/navyd/Downloads/v2ray/v2ray
 
 jinkela:
   client:
@@ -66,3 +67,17 @@ jinkela:
       min: 10s
       max: 30min
     # once_timeout: 5s
+dns:
+  hosts: 
+    - www.google.com
+  update_interval: 10min
+  retry:
+    count: 3
+    interval_algo:
+      type: Beb
+      min: 5s
+      max: 30min
+check:
+  timeout: 5s
+  ifname: eth0
+  

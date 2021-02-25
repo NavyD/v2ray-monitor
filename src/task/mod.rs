@@ -3,6 +3,7 @@ pub mod subscription;
 pub mod switch;
 pub mod tcp_ping;
 pub mod v2ray_task_config;
+pub mod check_network;
 
 use anyhow::{anyhow, Result};
 use std::{

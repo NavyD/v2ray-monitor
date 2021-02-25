@@ -732,7 +732,7 @@ bin_path: /usr/bin/v2ray
             env_logger::builder()
                 .is_test(true)
                 .filter_level(LevelFilter::Info)
-                .filter_module(crate_name, LevelFilter::Debug)
+                .filter_module(crate_name, LevelFilter::Trace)
                 // .filter_module(&(crate_name.to_string() + "::tcp_ping"), LevelFilter::Debug)
                 .init();
             // TEST_DIR.set(Path::new("tests/data").to_path_buf());

@@ -2,7 +2,7 @@ use std::{
     cmp::Ordering,
     collections::BinaryHeap,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::{
@@ -128,74 +128,53 @@ impl<V: V2rayService> SwitchTask<V> {
     }
 
     /// 等待首次接收node stats数据并无限循环切换节点
-    pub async fn run(&self, rx: Receiver<Vec<(Node, TcpPingStatistic)>>) -> Result<()> {
+    pub async fn run(
+        &self,
+        rx: Receiver<Vec<(Node, TcpPingStatistic)>>,
+        mut switch_rx: Receiver<()>,
+    ) -> Result<()> {
         self.update_node_stats(rx).await?;
-        let retry_srv = RetryService::new(self.prop.retry.clone());
         self.v2.clean_env().await?;
-
-        let (mut last_switched, mut last_duration, mut last_checked) =
-            (None::<Vec<Node>>, None::<Duration>, false);
-
+        let nodes = self.switch_nodes().await?;
+        log::trace!("switched first nodes: {:?}", nodes);
+        let (mut last_switched, mut last_duration) = (None::<Vec<Node>>, None::<SystemTime>);
+        let mut received_count = 0;
         loop {
-            log::debug!("retrying check networking");
-            match retry_srv
-                .retry_on(|| self.check_network(), last_checked)
-                .await
-            {
-                Ok((retries, duration)) => {
-                    // 这次做成功时重试 后失败退出
-                    if last_checked {
-                        log::debug!(
-                            "Found network problems. Reconfirming the problem after checking {} times of {:?}",
-                            retries,
-                            duration
-                        );
-                        last_duration = Some(duration);
-                    }
-                    // 上次是失败时 这次是做失败时重试 后成功退出
-                    else {
-                        log::debug!("After {} retries and {:?}, it is checked that the network has recovered", retries, duration);
-                    }
+            log::trace!("waiting for switch received");
+            if switch_rx.recv().await.is_some() {
+                received_count += 1;
+                if received_count < self.prop.retry.count {
+                    log::trace!("switch continue for received count: {}", received_count);
+                    continue;
+                } else {
+                    log::info!("switching nodes for received count: {}", received_count);
+                    received_count = 0;
                 }
-                // 重试次数达到max_retries
-                Err(e) => {
-                    if !last_checked {
-                        log::debug!("trying to switch tangents, Confirm that there is a problem: {}, last_checked: {:?}, last_switched: {:?}, last_duration: {:?}", 
-                                e,
-                                last_checked,
-                                last_switched,
-                                last_duration,
+                // switch node
+                // 将上次切换的节点重入 stats 权重排序
+                if let Err(e) = self.repush_last(
+                    last_switched.take(),
+                    last_duration.take().and_then(|t| t.elapsed().ok()),
+                ) {
+                    log::warn!("switch last error: {}", e);
+                }
+                match self.switch_nodes().await {
+                    Ok(nodes) => {
+                        if log::log_enabled!(log::Level::Info) {
+                            log::info!(
+                                "Node switch succeeded: {:?}",
+                                nodes.iter().map(|n| n.remark.as_ref()).collect::<Vec<_>>()
                             );
-                        // switch node
-                        // 将上次切换的节点重入 stats 权重排序
-                        if let Err(e) = self.repush_last(last_switched.take(), last_duration.take())
-                        {
-                            log::warn!("switch last error: {}", e);
                         }
-                        match self.switch_nodes().await {
-                            Ok(nodes) => {
-                                if log::log_enabled!(log::Level::Info) {
-                                    log::info!(
-                                        "Node switch succeeded: {:?}",
-                                        nodes.iter().map(|n| n.remark.as_ref()).collect::<Vec<_>>()
-                                    );
-                                }
-                                last_switched.replace(nodes);
-                                continue;
-                            }
-                            Err(e) => {
-                                log::error!("switch error: {}", e);
-                            }
-                        }
-                    } else {
-                        log::debug!(
-                            "Check that a failure has occurred: {}, try again if it fails",
-                            e
-                        );
+                        last_switched.replace(nodes);
+                        last_duration.replace(SystemTime::now());
+                        continue;
+                    }
+                    Err(e) => {
+                        log::error!("switch error: {}", e);
                     }
                 }
             }
-            last_checked = !last_checked;
         }
     }
 
@@ -459,7 +438,7 @@ mod tests {
         assert!(task.stats.lock().is_empty());
 
         stats_tx.send(nodes.to_vec()).await?;
-        task.run(stats_rx).await?;
+        // task.run(stats_rx).await?;
         sleep(Duration::from_secs(4)).await;
 
         task.check_network().await?;

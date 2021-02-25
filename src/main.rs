@@ -1,11 +1,27 @@
-use std::time::Duration;
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    time::Duration,
+};
 
 use chrono::{DateTime, Local};
+use dns_lookup::lookup_host;
 use env_logger::Env;
 
+use pnet::{
+    packet::ip::IpNextHeaderProtocols,
+    transport::{
+        tcp_packet_iter, transport_channel, udp_packet_iter, TransportChannelType,
+        TransportProtocol,
+    },
+};
 use tokio::time::sleep;
-use v2ray_monitor::V2rayTaskManager;
+use v2ray_monitor::{V2rayTaskManager};
 
+use anyhow::Result;
+
+use pnet::packet::{MutablePacket, Packet};
+
+use std::env;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let opt = Opt::from_args();

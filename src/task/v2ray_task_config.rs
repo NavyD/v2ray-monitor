@@ -50,6 +50,8 @@ pub struct V2rayTaskProperty {
     pub switch: SwitchTaskProperty,
     pub v2ray: V2rayProperty,
     pub jinkela: Option<JinkelaCheckinTaskProperty>,
+    pub dns: Option<DnsFlushProperty>,
+    pub check: Option<CheckNetworkProperty>,
 }
 
 // ...
@@ -179,6 +181,39 @@ pub struct JinkelaClientProperty {
     pub timeout: Duration,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DnsFlushProperty {
+    pub hosts: Vec<String>,
+    #[serde(with = "humantime_serde")]
+    pub update_interval: Duration,
+    pub retry: RetryProperty,
+}
+
+impl Default for DnsFlushProperty {
+    fn default() -> Self {
+        Self {
+            hosts: vec!["www.google.com".to_string()],
+            update_interval: Duration::from_secs(60 * 10),
+            retry: RetryProperty {
+                count: 3,
+                interval_algo: RetryIntevalAlgorithm::Beb {
+                    min: Duration::from_secs(1),
+                    max: Duration::from_secs(10),
+                },
+                half: None,
+                once_timeout: None,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CheckNetworkProperty {
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+    pub ifname: String,
+}
+
 mod naivetime_format {
     use chrono::NaiveTime;
     use serde::{self, Deserialize, Deserializer, Serializer};
@@ -238,11 +273,9 @@ mod tests {
     #[test]
     fn read_config_yaml() -> anyhow::Result<()> {
         let content = read_to_string("tests/data/config.yaml")?;
-        let property: V2rayTaskProperty = serde_yaml::from_str(&content)?;
+        let property = serde_yaml::from_str::<V2rayTaskProperty>(&content)?;
         log::debug!("property: {:?}", property);
-        let a = "2018-02-14T00:28:07".parse::<Timestamp>()?;
-        // let a = humantime::format_rfc3339(SystemTime::now());
-        log::info!("du: {:?}", a);
+        assert!(property.check.is_some());
         Ok(())
     }
 }
