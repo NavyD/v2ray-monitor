@@ -49,24 +49,25 @@ impl JinkelaCheckinTask {
     }
 }
 
-const DAY: Duration = Duration::from_secs(60 * 60 * 24);
+static DAY: Duration = Duration::from_secs(60 * 60 * 24);
 
 async fn sleep_on(update_time: &mut DateTime<Local>) -> Result<()> {
     let day = DAY;
-
+    let next_time = *update_time + chrono::Duration::from_std(day)?;
     let now = Local::now();
     let duration = if now < *update_time {
         *update_time - now
     } else {
-        now - *update_time
+        next_time - now
     };
-    log::debug!(
-        "jinkela checkin task sleeping {} on update time {}",
+    log::info!(
+        "jinkela checkin task sleeping {} until {} on update time {}",
         duration,
+        now + duration,
         *update_time
     );
     sleep(duration.to_std()?).await;
-    *update_time = *update_time + chrono::Duration::from_std(day)?;
+    *update_time = next_time;
     log::trace!("next update_time: {}", *update_time);
     Ok(())
 }

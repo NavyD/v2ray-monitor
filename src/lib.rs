@@ -70,20 +70,22 @@ impl V2rayTaskManager {
         let local_v2 = self.local_v2.clone();
         let ssh_v2 = self.ssh_v2.clone();
         let switch_prop = self.prop.switch.clone();
-        match &switch_prop.v2_type {
-            V2rayType::Local => {
-                SwitchTask::new(switch_prop, local_v2.clone())
-                    .run(stats_rx)
-                    .await
-                    .unwrap();
-            }
-            V2rayType::Ssh => {
-                SwitchTask::new(switch_prop, ssh_v2.clone().expect("not found v2ray ssh"))
-                    .run(stats_rx)
-                    .await
-                    .unwrap();
-            }
-        };
+        tokio::spawn(async move {
+            match &switch_prop.v2_type {
+                V2rayType::Local => {
+                    SwitchTask::new(switch_prop, local_v2.clone())
+                        .run(stats_rx)
+                        .await
+                        .unwrap();
+                }
+                V2rayType::Ssh => {
+                    SwitchTask::new(switch_prop, ssh_v2.clone().expect("not found v2ray ssh"))
+                        .run(stats_rx)
+                        .await
+                        .unwrap();
+                }
+            };
+        });
 
         if let Some(prop) = self.prop.jinkela.take() {
             let jinkela = JinkelaCheckinTask::new(prop);
