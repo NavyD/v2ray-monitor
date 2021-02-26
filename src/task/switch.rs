@@ -1,6 +1,8 @@
 use std::{
     cmp::Ordering,
-    collections::BinaryHeap,
+    collections::{BinaryHeap, HashSet},
+    net::IpAddr,
+    ops::Deref,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
@@ -11,6 +13,7 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 
+use futures::TryFutureExt;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use reqwest::{Client, Proxy};
@@ -18,8 +21,19 @@ use tokio::sync::mpsc::Receiver;
 
 use super::{
     filter::{Filter, *},
-    v2ray_task_config::SwitchTaskProperty,
+    v2ray_task_config::{NetworkMonitorProperty, SwitchTaskProperty},
     RetryService,
+};
+
+use pnet::datalink::Channel::Ethernet;
+use pnet::packet::ip::{IpNextHeaderProtocol, IpNextHeaderProtocols};
+use pnet::packet::ipv4::Ipv4Packet;
+use pnet::packet::tcp::TcpPacket;
+use pnet::packet::Packet;
+use pnet::util::MacAddr;
+use pnet::{
+    datalink::{self, DataLinkReceiver},
+    packet::ethernet::{EtherTypes, EthernetPacket},
 };
 
 #[derive(Clone, Debug)]
@@ -109,6 +123,7 @@ pub struct SwitchTask<V: V2rayService> {
     select_filter: Arc<SwitchSelectFilter>,
     prop: SwitchTaskProperty,
     check_client: OnceCell<Client>,
+    check_ips: Arc<Mutex<HashSet<IpAddr>>>,
 }
 
 impl<V: V2rayService> SwitchTask<V> {
@@ -122,59 +137,173 @@ impl<V: V2rayService> SwitchTask<V> {
                 .as_ref()
                 .map(|s| Arc::new(NameRegexFilter::new(s))),
             select_filter: Arc::new(SwitchSelectFilter::new(prop.filter.lb_nodes_size.into())),
-            prop,
             check_client: OnceCell::new(),
+            check_ips: Arc::new(Mutex::new(HashSet::new())),
+            prop,
         }
     }
 
     /// 等待首次接收node stats数据并无限循环切换节点
     pub async fn run(
         &self,
-        rx: Receiver<Vec<(Node, TcpPingStatistic)>>,
-        mut switch_rx: Receiver<bool>,
+        node_stats_rx: Receiver<Vec<(Node, TcpPingStatistic)>>,
+        ips_rx: Receiver<Vec<IpAddr>>,
     ) -> Result<()> {
-        self.update_node_stats(rx).await?;
+        tokio::try_join!(
+            self.update_check_ips(ips_rx),
+            self.update_node_stats(node_stats_rx)
+        )?;
+
+        let mut link_rev = self.find_link_receiver()?;
         self.v2.clean_env().await?;
-        // let nodes = self.switch_nodes().await?;
-        // log::trace!("switched first nodes: {:?}", nodes);
-        let (mut last_switched, mut last_duration) = (None::<Vec<Node>>, None::<SystemTime>);
-        let mut received_count = 0;
-        while let Some(_) = switch_rx.recv().await {
-            log::trace!("switch received");
-            received_count += 1;
-            // if received_count < self.prop.retry.count {
-            //     log::trace!("switch continue for received count: {}", received_count);
-            //     continue;
-            // } else {
-            //     log::info!("switching nodes for received count: {}", received_count);
-            //     received_count = 0;
-            // }
-            // switch node
-            // 将上次切换的节点重入 stats 权重排序
-            if let Err(e) = self.repush_last(
-                last_switched.take(),
-                last_duration.take().and_then(|t| t.elapsed().ok()),
-            ) {
-                log::warn!("switch last error: {}", e);
-            }
-            match self.switch_nodes().await {
-                Ok(nodes) => {
-                    if log::log_enabled!(log::Level::Info) {
-                        log::info!(
-                            "Node switch succeeded: {:?}",
-                            nodes.iter().map(|n| n.remark.as_ref()).collect::<Vec<_>>()
-                        );
+
+        let monitor_prop = &self.prop.monitor;
+        let mut timeout_count = 0;
+        let mut last = None::<SystemTime>;
+        let (mut last_nodes, mut last_time) = (None::<Vec<Node>>, None::<SystemTime>);
+        loop {
+            match link_rev.next() {
+                Ok(packet) => {
+                    if let Ok(is_forword) = get_packet_direction(packet, self.check_ips.clone()) {
+                        // 收到回复
+                        if !is_forword {
+                            timeout_count = 0;
+                            last.take();
+                            continue;
+                        }
+
+                        if let Some(t) = last {
+                            let elapsed = t.elapsed()?;
+                            if elapsed < monitor_prop.timeout {
+                                continue;
+                            }
+                            timeout_count += 1;
+                            if timeout_count < monitor_prop.count {
+                                log::trace!("No response found within duration: {:?}, timeout count: {}, limit count: {}", elapsed, timeout_count, monitor_prop.count);
+                                continue;
+                            }
+                            // switch
+                            if let Err(e) = self.switch(&mut last_nodes, &mut last_time).await {
+                                log::error!("switch error: {}", e);
+                            }
+                            // self.check_network().await?;
+                        } else {
+                            last.replace(SystemTime::now());
+                        }
                     }
-                    last_switched.replace(nodes);
-                    last_duration.replace(SystemTime::now());
-                    continue;
                 }
-                Err(e) => {
-                    log::error!("switch error: {}", e);
-                }
+                Err(e) => log::debug!("receive error {} for interface {}", e, monitor_prop.ifname),
             }
         }
-        Err(anyhow!("channel closed"))
+    }
+
+    async fn switch(
+        &self,
+        last_nodes: &mut Option<Vec<Node>>,
+        last_time: &mut Option<SystemTime>,
+    ) -> Result<()> {
+        self.repush_last(
+            last_nodes.take(),
+            last_time.take().and_then(|t| t.elapsed().ok()),
+        )?;
+
+        let nodes = self.select_filter.filter(self.stats.clone());
+        if nodes.is_empty() {
+            log::error!("Switch node error: no any nodes");
+            return Err(anyhow!("no any nodes"));
+        } else if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
+                "switching nodes with {:?}",
+                nodes
+                    .iter()
+                    .map(|node| node.remark.as_ref())
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        // 切换节点
+        self.v2
+            .restart_in_background(
+                &self
+                    .v2
+                    .gen_config(&nodes.iter().collect::<Vec<_>>())
+                    .await?,
+            )
+            .await?;
+
+        last_nodes.replace(nodes);
+        last_time.replace(SystemTime::now());
+
+        if let Err(e) = RetryService::new(self.prop.retry.clone())
+            .retry_on(|| self.check_network(), false)
+            .await
+        {
+            log::warn!(
+                "The network still fails: {}, after switching nodes: {:?}",
+                e,
+                last_nodes
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|n| n.remark.as_ref())
+                    .collect::<Vec<_>>()
+            );
+            return Err(anyhow!("check network failed"));
+        }
+
+        if log::log_enabled!(log::Level::Info) {
+            log::info!(
+                "Node switch succeeded: {:?}",
+                last_nodes
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|n| n.remark.as_ref())
+                    .collect::<Vec<_>>()
+            );
+        }
+        Ok(())
+    }
+
+    fn find_link_receiver(&self) -> Result<Box<dyn DataLinkReceiver>> {
+        let ifname = &self.prop.monitor.ifname;
+        log::trace!("Looking for available network cards by name: {}", ifname);
+        let interface = datalink::interfaces()
+            .into_iter()
+            .find(|iface| iface.name == *ifname)
+            .ok_or_else(|| anyhow!("not found interface with name: {}", ifname))?;
+        // Create a channel to receive on
+        match datalink::channel(&interface, Default::default()) {
+            Ok(Ethernet(_, rx)) => Ok(rx),
+            Ok(_) => Err(anyhow!("unhandled channel type for ifname: {}", ifname)),
+            Err(e) => Err(e).map_err(Into::into),
+        }
+    }
+
+    async fn update_check_ips(&self, mut ips_rx: Receiver<Vec<IpAddr>>) -> Result<()> {
+        log::trace!("Waiting for the first update of ips");
+        let ips = ips_rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("receive error"))?;
+
+        let update = |ips: Vec<IpAddr>, check_ips: &Arc<Mutex<HashSet<IpAddr>>>| {
+            log::debug!("Received ips: {:?}", ips);
+            let mut cips = check_ips.lock();
+            cips.clear();
+            ips.into_iter().for_each(|ip| {
+                cips.insert(ip);
+            });
+        };
+
+        let check_ips = self.check_ips.clone();
+        update(ips, &check_ips);
+        tokio::spawn(async move {
+            while let Some(ips) = ips_rx.recv().await {
+                update(ips, &check_ips);
+            }
+        });
+        Ok(())
     }
 
     /// 更新node stats为SwitchNodeStat。首次调用将会等待数据可用，之后会在后台更新。
@@ -309,30 +438,39 @@ impl<V: V2rayService> SwitchTask<V> {
         }
         Ok(())
     }
+}
 
-    async fn switch_nodes(&self) -> Result<Vec<Node>> {
-        let nodes = self.select_filter.filter(self.stats.clone());
-        if nodes.is_empty() {
-            log::error!("Switch node error: no any nodes");
-            return Err(anyhow!("no any nodes"));
+fn get_packet_direction(packet: &[u8], ips: Arc<Mutex<HashSet<IpAddr>>>) -> Result<bool, ()> {
+    let ethernet = EthernetPacket::new(packet).ok_or(())?;
+    match ethernet.get_ethertype() {
+        EtherTypes::Ipv4 => {
+            let header = Ipv4Packet::new(ethernet.payload()).ok_or(())?;
+            let source = IpAddr::V4(header.get_source());
+            let destination = IpAddr::V4(header.get_destination());
+            let protocol = header.get_next_level_protocol();
+            match protocol {
+                IpNextHeaderProtocols::Tcp => {
+                    let ips = ips.lock();
+                    if ips.contains(&source) {
+                        let tcp = TcpPacket::new(header.payload()).ok_or(())?;
+                        if tcp.get_flags() & 4 != 0 {
+                            log::debug!("{} RST: {} <- {}", protocol, destination, source);
+                            Err(())
+                        } else {
+                            log::trace!("{}: {} <- {}", protocol, destination, source);
+                            Ok(false)
+                        }
+                    } else if ips.contains(&destination) {
+                        log::trace!("{}: {} -> {}", protocol, source, destination);
+                        Ok(true)
+                    } else {
+                        Err(())
+                    }
+                }
+                _ => Err(()),
+            }
         }
-
-        // 切换节点
-        let config = self
-            .v2
-            .gen_config(&nodes.iter().collect::<Vec<_>>())
-            .await?;
-        if log::log_enabled!(log::Level::Trace) {
-            log::trace!(
-                "switching nodes with {:?}",
-                nodes
-                    .iter()
-                    .map(|node| node.remark.as_ref())
-                    .collect::<Vec<_>>()
-            );
-        }
-        self.v2.restart_in_background(&config).await?;
-        Ok(nodes)
+        _ => Err(()),
     }
 }
 
@@ -390,17 +528,17 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    // #[ignore]
-    async fn switch_normal_nodes() -> Result<()> {
-        let task = get_updated_task().await?;
-        assert!(task.check_network().await.is_err());
-        let nodes = task.switch_nodes().await?;
-        assert!(!nodes.is_empty(), "switched nodes has empty");
-        task.check_network().await?;
-        task.v2.stop_all().await?;
-        Ok(())
-    }
+    // #[tokio::test]
+    // // #[ignore]
+    // async fn switch_normal_nodes() -> Result<()> {
+    //     let task = get_updated_task().await?;
+    //     assert!(task.check_network().await.is_err());
+    //     let nodes = task.switch_nodes().await?;
+    //     assert!(!nodes.is_empty(), "switched nodes has empty");
+    //     task.check_network().await?;
+    //     task.v2.stop_all().await?;
+    //     Ok(())
+    // }
 
     #[tokio::test]
     // #[ignore]

@@ -41,6 +41,10 @@ pub struct SwitchTaskProperty {
     pub filter: SwitchFilterProperty,
     #[serde(default)]
     pub v2_type: V2rayType,
+
+    #[serde(default)]
+    pub monitor: NetworkMonitorProperty,
+
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -51,7 +55,7 @@ pub struct V2rayTaskProperty {
     pub v2ray: V2rayProperty,
     pub jinkela: Option<JinkelaCheckinTaskProperty>,
     pub dns: Option<DnsFlushProperty>,
-    pub check: Option<CheckNetworkProperty>,
+    pub check: Option<NetworkMonitorProperty>,
 }
 
 // ...
@@ -208,10 +212,21 @@ impl Default for DnsFlushProperty {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CheckNetworkProperty {
+pub struct NetworkMonitorProperty {
     #[serde(with = "humantime_serde")]
     pub timeout: Duration,
     pub ifname: String,
+    pub count: usize,
+}
+
+impl Default for NetworkMonitorProperty {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(2),
+            count: 3,
+            ifname: "eth0".to_string(),
+        }
+    }
 }
 
 mod naivetime_format {

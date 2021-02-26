@@ -3,7 +3,7 @@ pub mod subscription;
 pub mod switch;
 pub mod tcp_ping;
 pub mod v2ray_task_config;
-pub mod check_network;
+pub mod dns_flush;
 
 use anyhow::{anyhow, Result};
 use std::{
@@ -320,7 +320,7 @@ mod filter {
                 // 找出size个节点
                 for _ in 0..self.size {
                     if let Some(v) = val.pop() {
-                        log::debug!(
+                        log::trace!(
                             "selected node: {:?}, tcp ping rtt avg: {:?}, service durations: {:?}",
                             v.node.remark,
                             v.tcp_stat.rtt_avg,

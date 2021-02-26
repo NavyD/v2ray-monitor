@@ -28,6 +28,62 @@ async fn get_node_stats() -> Result<Vec<(Node, TcpPingStatistic)>> {
 }
 ```
 
+### future cannot be sent between threads safely for self
+
+```
+future cannot be sent between threads safely
+within `impl futures::Future`, the trait `std::marker::Send` is not implemented for `*mut ()`rustc
+lib.rs(1, 1): required by a bound in this
+spawn.rs(129, 21): required by this bound in `tokio::spawn`
+switch.rs(58, 14): future is not `Send` as this value is used across an await
+```
+
+```rust
+pub struct A {
+    vals: Arc<Mutex<HashSet<Val>>>,
+}
+
+fn handle(val: &HashSet<Val>) -> Result<bool> {
+
+    Ok(true)
+}
+struct Val;
+
+
+impl A {
+    pub fn new() -> Self {
+        Self {
+            vals: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    pub async fn run(&self) -> Result<()> {
+        if let Ok(is_forword) = handle( &self.vals.clone().lock()) {
+            // error: future is not `Send` as this value is used across an await
+             self.call_async().await;
+            // self.call_sync();
+        }
+        Ok(())
+    }
+
+    fn call_sync(&self) {
+
+    }
+
+    async fn call_async(&self) {
+    }
+}
+
+async fn test() {
+    tokio::spawn(async move {
+        A::new()
+            .run()
+            .await
+            .unwrap()
+    });
+}
+```
+
 参考：
 
 * [how to init with async method](https://github.com/matklad/once_cell/issues/108)
