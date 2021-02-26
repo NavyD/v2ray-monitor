@@ -19,7 +19,7 @@ impl SubscriptionTask {
     ///
     pub async fn run(&self, tx: Sender<Vec<Node>>) -> Result<()> {
         let subscpt = self.prop.clone();
-        let retry_srv = RetryService::new(subscpt.retry_failed.clone());
+        let retry_srv = RetryService::new(subscpt.retry.clone());
 
         if let Err(e) = load_from_local(&subscpt, &tx).await {
             log::warn!("Failed to load the subscription node locally: {}", e);

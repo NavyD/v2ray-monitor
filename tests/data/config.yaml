@@ -1,47 +1,15 @@
 tcp_ping:
-  ping_interval: 600s
   filter:
     name_regex: "→香港"
-  ping:
-    count: 3
-    ping_url: https://www.google.com/gen_204
-    timeout: 1s 500ms
-    concurr_num: 10
-  retry_failed:
-    count: 5
-    interval_algo:
-      type: Beb
-      min: 1s
-      max: 60s
-  subscpt_path: tests/data/v2ray-subscription.txt
-
-subscpt:
+subx:
   path: tests/data/v2ray-subscription.txt
   url: https://www.jinkela.site/link/ukWr5K49YjHIQGdL?sub=3
-  update_interval: 12h
-  retry_failed:
-    count: 3
-    interval_algo:
-      type: Beb
-      min: 5min
-      max: 30min
 
 switch:
-  check_url: https://www.google.com/gen_204
-  check_timeout: 2s
+
   filter:
     lb_nodes_size: 3
     name_regex: "→香港"
-  retry:
-    count: 6
-    interval_algo:
-      type: SwitchBeb
-      min: 200ms
-      max: 30s
-      switch_limit: 5
-    half:
-      start: "01:00:00"
-      interval: 5h
   v2_type: Ssh
 v2ray:
   ssh:
@@ -68,16 +36,6 @@ jinkela:
       max: 30min
     # once_timeout: 5s
 dns:
-  hosts: 
+  hosts:
     - www.google.com
-  update_interval: 10min
-  retry:
-    count: 3
-    interval_algo:
-      type: Beb
-      min: 5s
-      max: 30min
-check:
-  timeout: 5s
-  ifname: eth0
-  
+    - www.youtube.com

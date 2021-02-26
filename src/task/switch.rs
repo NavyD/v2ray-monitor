@@ -2,7 +2,6 @@ use std::{
     cmp::Ordering,
     collections::{BinaryHeap, HashSet},
     net::IpAddr,
-    ops::Deref,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
@@ -13,7 +12,6 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 
-use futures::TryFutureExt;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use reqwest::{Client, Proxy};
@@ -21,16 +19,16 @@ use tokio::sync::mpsc::Receiver;
 
 use super::{
     filter::{Filter, *},
-    v2ray_task_config::{NetworkMonitorProperty, SwitchTaskProperty},
+    v2ray_task_config::SwitchTaskProperty,
     RetryService,
 };
 
 use pnet::datalink::Channel::Ethernet;
-use pnet::packet::ip::{IpNextHeaderProtocol, IpNextHeaderProtocols};
+use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::Packet;
-use pnet::util::MacAddr;
+
 use pnet::{
     datalink::{self, DataLinkReceiver},
     packet::ethernet::{EtherTypes, EthernetPacket},
@@ -124,6 +122,7 @@ pub struct SwitchTask<V: V2rayService> {
     prop: SwitchTaskProperty,
     check_client: OnceCell<Client>,
     check_ips: Arc<Mutex<HashSet<IpAddr>>>,
+    check_retry_srv: RetryService,
 }
 
 impl<V: V2rayService> SwitchTask<V> {
@@ -139,6 +138,7 @@ impl<V: V2rayService> SwitchTask<V> {
             select_filter: Arc::new(SwitchSelectFilter::new(prop.filter.lb_nodes_size.into())),
             check_client: OnceCell::new(),
             check_ips: Arc::new(Mutex::new(HashSet::new())),
+            check_retry_srv: RetryService::new(prop.check_retry.clone()),
             prop,
         }
     }
@@ -157,42 +157,68 @@ impl<V: V2rayService> SwitchTask<V> {
         let mut link_rev = self.find_link_receiver()?;
         self.v2.clean_env().await?;
 
-        let monitor_prop = &self.prop.monitor;
-        let mut timeout_count = 0;
-        let mut last = None::<SystemTime>;
+        let monitor = &self.prop.monitor;
+        // packet上次数据
+        let (mut p_timeout_count, mut p_last_time) = (0, None::<SystemTime>);
+        // switch上次数据
         let (mut last_nodes, mut last_time) = (None::<Vec<Node>>, None::<SystemTime>);
+
+        // 统计数据
+        let (mut switch_count, mut switch_failed_count, start) = (0, 0, SystemTime::now());
+
         loop {
             match link_rev.next() {
                 Ok(packet) => {
                     if let Ok(is_forword) = get_packet_direction(packet, self.check_ips.clone()) {
                         // 收到回复
                         if !is_forword {
-                            timeout_count = 0;
-                            last.take();
+                            log::trace!("received reponse. reset timeout count: {} as 0, last elapsed: {:?} as None", 
+                                p_timeout_count, 
+                                p_last_time.as_ref().and_then(|t| t.elapsed().ok())
+                            );
+                            p_timeout_count = 0;
+                            p_last_time.take();
                             continue;
                         }
-
-                        if let Some(t) = last {
+                        // 发送 且 上次还未收到回复
+                        if let Some(t) = p_last_time {
                             let elapsed = t.elapsed()?;
-                            if elapsed < monitor_prop.timeout {
+                            if elapsed < monitor.timeout {
                                 continue;
                             }
-                            timeout_count += 1;
-                            if timeout_count < monitor_prop.count {
-                                log::trace!("No response found within duration: {:?}, timeout count: {}, limit count: {}", elapsed, timeout_count, monitor_prop.count);
+                            p_timeout_count += 1;
+                            if p_timeout_count < monitor.count {
+                                log::trace!("No response found within duration: {:?}, timeout count: {}, limit count: {}", elapsed, p_timeout_count, monitor.count);
                                 continue;
                             }
+                            // switch limit for elapsed
+                            if let Some(elapsed) = last_time.as_ref().and_then(|t| t.elapsed().ok()) {
+                                let limit_interval = self.prop.limit_interval;
+                                if elapsed < limit_interval {
+                                    log::debug!(
+                                        "Ignore frequent switching. elapsed: {:?}, switch limit: {:?}",
+                                        elapsed,
+                                        limit_interval
+                                    );
+                                    continue;
+                                }
+                            }
+                            switch_count += 1;
                             // switch
                             if let Err(e) = self.switch(&mut last_nodes, &mut last_time).await {
+                                switch_failed_count += 1;
                                 log::error!("switch error: {}", e);
                             }
-                            // self.check_network().await?;
+                            // 每10次报告一次
+                            if switch_count % 10 == 0 {
+                                log::info!("{} switchovers occurred within {:?} minutes, switch failed count: {}", switch_count, start.elapsed()?, switch_failed_count);
+                            }
                         } else {
-                            last.replace(SystemTime::now());
+                            p_last_time.replace(SystemTime::now());
                         }
                     }
                 }
-                Err(e) => log::debug!("receive error {} for interface {}", e, monitor_prop.ifname),
+                Err(e) => log::debug!("receive error {} for interface {}", e, monitor.ifname),
             }
         }
     }
@@ -202,6 +228,7 @@ impl<V: V2rayService> SwitchTask<V> {
         last_nodes: &mut Option<Vec<Node>>,
         last_time: &mut Option<SystemTime>,
     ) -> Result<()> {
+        log::debug!("Start switching nodes for last_nodes: {:?}, last_duration: {:?}", last_nodes, last_time.as_ref().and_then(|t| t.elapsed().ok()));
         self.repush_last(
             last_nodes.take(),
             last_time.take().and_then(|t| t.elapsed().ok()),
@@ -234,7 +261,8 @@ impl<V: V2rayService> SwitchTask<V> {
         last_nodes.replace(nodes);
         last_time.replace(SystemTime::now());
 
-        if let Err(e) = RetryService::new(self.prop.retry.clone())
+        if let Err(e) = self
+            .check_retry_srv
             .retry_on(|| self.check_network(), false)
             .await
         {
@@ -453,8 +481,9 @@ fn get_packet_direction(packet: &[u8], ips: Arc<Mutex<HashSet<IpAddr>>>) -> Resu
                     let ips = ips.lock();
                     if ips.contains(&source) {
                         let tcp = TcpPacket::new(header.payload()).ok_or(())?;
+                        // 在dns查询后tcp rst连接重置 相当无法连接
                         if tcp.get_flags() & 4 != 0 {
-                            log::debug!("{} RST: {} <- {}", protocol, destination, source);
+                            log::trace!("{} RST: {} <- {}", protocol, destination, source);
                             Err(())
                         } else {
                             log::trace!("{}: {} <- {}", protocol, destination, source);
@@ -567,7 +596,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn run_test() -> Result<()> {
-        let (stats_tx, stats_rx) = channel(1);
+        let (stats_tx, _stats_rx) = channel(1);
         let switch = get_switch_prop()?;
         let nodes = get_node_stats().await?;
 
@@ -656,15 +685,6 @@ check_timeout: 2s
 filter:
     lb_nodes_size: 3
     name_regex: "专线"
-retry:
-    count: 7
-    interval_algo:
-        type: "Beb"
-        min: "10ms"
-        max: "3s"
-    half:
-        start: "02:00:00"
-        interval: 5h
         "#;
         serde_yaml::from_str::<SwitchTaskProperty>(content).map_err(Into::into)
     }

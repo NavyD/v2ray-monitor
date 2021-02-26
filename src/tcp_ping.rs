@@ -165,7 +165,7 @@ async fn ping_task<T: V2rayService>(
     node: &Node,
     prop: &PingProperty,
 ) -> Result<TcpPingStatistic> {
-    let (url, count, timeout) = (prop.ping_url.clone(), prop.count, prop.timeout);
+    let (url, count, timeout) = (prop.url.clone(), prop.count, prop.timeout);
     let mut durations: Vec<Option<Duration>> = vec![None; count as usize];
 
     let port = v2.get_available_port().await?;

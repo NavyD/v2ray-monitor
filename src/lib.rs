@@ -5,7 +5,7 @@ use task::{
     dns_flush,
     jinkela_checkin::JinkelaCheckinTask,
     subscription::SubscriptionTask,
-    switch::{SwitchTask},
+    switch::SwitchTask,
     tcp_ping::TcpPingTask,
     v2ray_task_config::{V2rayTaskProperty, V2rayType},
 };
@@ -40,7 +40,7 @@ impl V2rayTaskManager {
     pub async fn run(&mut self) {
         // start subscription task
         let (nodes_tx, nodes_rx) = channel(1);
-        let subscpt = self.prop.subscpt.clone();
+        let subscpt = self.prop.subx.clone();
         tokio::spawn(async move {
             SubscriptionTask::new(subscpt).run(nodes_tx).await.unwrap();
         });
@@ -68,7 +68,7 @@ impl V2rayTaskManager {
         });
 
         let (ips_tx, ips_rx) = channel::<Vec<IpAddr>>(1);
-        let dns_task = dns_flush::HostDnsFlushTask::new(self.prop.dns.take().unwrap());
+        let dns_task = dns_flush::HostDnsFlushTask::new(self.prop.dns.clone());
         tokio::spawn(async move {
             dns_task.run(ips_tx).await.unwrap();
         });

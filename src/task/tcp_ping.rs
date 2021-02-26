@@ -72,7 +72,7 @@ impl<V: V2rayService> TcpPingTask<V> {
         tx: Sender<Vec<(Node, TcpPingStatistic)>>,
     ) -> Result<()> {
         self.update_nodes(rx).await?;
-        let retry_srv = RetryService::new(self.prop.retry_failed.clone());
+        let retry_srv = RetryService::new(self.prop.retry.clone());
 
         let task = {
             let v2 = self.v2.clone();
@@ -81,7 +81,7 @@ impl<V: V2rayService> TcpPingTask<V> {
             // let tx = tx.clone();
             Arc::new(move || dotask(v2.clone(), nodes.clone(), ping_prop.clone(), tx.clone()))
         };
-        let mut interval = time::interval(self.prop.ping_interval);
+        let mut interval = time::interval(self.prop.update_interval);
         loop {
             interval.tick().await;
             match retry_srv.retry_on(task.clone().as_ref(), false).await {

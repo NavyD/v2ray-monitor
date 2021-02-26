@@ -1,9 +1,9 @@
+pub mod dns_flush;
 pub mod jinkela_checkin;
 pub mod subscription;
 pub mod switch;
 pub mod tcp_ping;
 pub mod v2ray_task_config;
-pub mod dns_flush;
 
 use anyhow::{anyhow, Result};
 use std::{
@@ -21,7 +21,6 @@ use self::v2ray_task_config::{RetryIntevalAlgorithm, RetryProperty};
 struct Stat {
     half_start: Option<SystemTime>,
     failed_count: usize,
-    success_count: usize,
 }
 
 pub struct RetryService {
@@ -47,19 +46,8 @@ impl RetryService {
             stat: Arc::new(Mutex::new(Stat {
                 half_start,
                 failed_count: 0,
-                success_count: 0,
             })),
         }
-    }
-
-    fn retry_count(&self, ok_or_err: bool) -> usize {
-        let mut stat = self.stat.lock();
-        let retry = if ok_or_err {
-            &mut stat.success_count
-        } else {
-            &mut stat.failed_count
-        };
-        *retry
     }
 
     /// 根据在func执行结果决定是否重新执行func
@@ -70,7 +58,7 @@ impl RetryService {
         F: Fn() -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let name = if !ok_or_err { "success" } else { "failed" };
+        let name = if ok_or_err { "success" } else { "failed" };
         log::trace!("Retry on {}", name);
 
         let prop = &self.prop;

@@ -10,36 +10,11 @@
 extern crate pnet;
 
 use dns_lookup::lookup_host;
-use log::warn;
-use once_cell::sync::{Lazy, OnceCell};
-use parking_lot::Mutex;
-use pnet::datalink::{self, NetworkInterface};
 
-use pnet::util::MacAddr;
-
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::net::IpAddr;
-use std::process;
-use std::{
-    collections::{HashMap, HashSet},
-    env,
-    ops::Deref,
-};
-use std::{
-    io::{self, Write},
-    ops::Sub,
-    sync::{Arc, Barrier},
-    thread,
-    time::{Duration, SystemTime},
-};
-use tokio::{
-    sync::mpsc::{channel, Receiver, Sender},
-    time::interval,
-};
 
-use pnet::datalink::Channel::Ethernet;
-
-use crate::task::v2ray_task_config::NetworkMonitorProperty;
+use tokio::{sync::mpsc::Sender, time::interval};
 
 use super::{v2ray_task_config::DnsFlushProperty, RetryService};
 
@@ -87,41 +62,26 @@ impl HostDnsFlushTask {
 
 // #[cfg(test)]
 // mod tests {
-//     use std::sync::Once;
+//     use std::time::Duration;
 
-//     use log::LevelFilter;
-
-//     use crate::task::v2ray_task_config::DnsFlushProperty;
+//     use tokio::sync::mpsc::channel;
 
 //     use super::*;
 
 //     #[tokio::test]
-//     async fn basic() -> anyhow::Result<()> {
-//         let (ips_tx, ips_rx) = channel::<Vec<IpAddr>>(1);
-//         tokio::spawn(async {
-//             let dns_prop = DnsFlushProperty::default();
-//             HostDnsFlushTask::new(dns_prop).run(ips_tx).await.unwrap();
-//         });
-
-//         let (tx, mut rx) = channel::<bool>(1);
-//         let prop = Default::default();
-//         let task = CheckNetworkTask::new(prop);
-
+//     async fn basic() -> Result<()> {
+//         let prop = DnsFlushProperty {
+//             update_interval: Duration::from_secs(2),
+//             ..Default::default()
+//         };
+//         let task = HostDnsFlushTask::new(prop);
+//         let (tx, mut rx) = channel::<Vec<IpAddr>>(1);
 //         tokio::spawn(async move {
-//             while let Some(_) = rx.recv().await {
-//                 log::info!("switch nodes");
+//             while let Some(v) = rx.recv().await {
+//                 log::debug!("ips: {:?}", v);
 //             }
 //         });
-//         task.run(ips_rx, tx).await?;
+//         task.run(tx).await?;
 //         Ok(())
-//     }
-
-//     #[tokio::test]
-//     async fn test() {
-//         let (ips_tx, mut ips_rx) = channel::<()>(1);
-//         loop {
-//             log::debug!("test");
-//             if ips_rx.recv().await.is_some() {}
-//         }
 //     }
 // }
