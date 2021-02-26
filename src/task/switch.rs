@@ -195,7 +195,7 @@ impl<V: V2rayService> SwitchTask<V> {
                             if let Some(elapsed) = last_time.as_ref().and_then(|t| t.elapsed().ok()) {
                                 let limit_interval = self.prop.limit_interval;
                                 if elapsed < limit_interval {
-                                    log::debug!(
+                                    log::trace!(
                                         "Ignore frequent switching. elapsed: {:?}, switch limit: {:?}",
                                         elapsed,
                                         limit_interval

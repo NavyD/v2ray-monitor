@@ -1,6 +1,6 @@
 [package]
 name = "v2ray-monitor"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["navyd <dhjnavyd@gmail.com>"]
 edition = "2018"
 
@@ -18,7 +18,6 @@ base64 = "0.13"
 num_cpus = "1.13"
 rand = "0.8"
 tokio = {version = "1.2", features = ["process", "rt", "rt-multi-thread", "macros", "fs", "io-std", "time"]}
-futures = "0.3"
 # tokio = {version = "1.1", features = ["full"]}
 reqwest = { version = "0.11", features = ["socks", "cookies", "json"]}
 # time = "0.2"
