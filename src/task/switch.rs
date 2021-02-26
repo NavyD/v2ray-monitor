@@ -131,51 +131,50 @@ impl<V: V2rayService> SwitchTask<V> {
     pub async fn run(
         &self,
         rx: Receiver<Vec<(Node, TcpPingStatistic)>>,
-        mut switch_rx: Receiver<()>,
+        mut switch_rx: Receiver<bool>,
     ) -> Result<()> {
         self.update_node_stats(rx).await?;
         self.v2.clean_env().await?;
-        let nodes = self.switch_nodes().await?;
-        log::trace!("switched first nodes: {:?}", nodes);
+        // let nodes = self.switch_nodes().await?;
+        // log::trace!("switched first nodes: {:?}", nodes);
         let (mut last_switched, mut last_duration) = (None::<Vec<Node>>, None::<SystemTime>);
         let mut received_count = 0;
-        loop {
-            log::trace!("waiting for switch received");
-            if switch_rx.recv().await.is_some() {
-                received_count += 1;
-                if received_count < self.prop.retry.count {
-                    log::trace!("switch continue for received count: {}", received_count);
+        while let Some(_) = switch_rx.recv().await {
+            log::trace!("switch received");
+            received_count += 1;
+            // if received_count < self.prop.retry.count {
+            //     log::trace!("switch continue for received count: {}", received_count);
+            //     continue;
+            // } else {
+            //     log::info!("switching nodes for received count: {}", received_count);
+            //     received_count = 0;
+            // }
+            // switch node
+            // 将上次切换的节点重入 stats 权重排序
+            if let Err(e) = self.repush_last(
+                last_switched.take(),
+                last_duration.take().and_then(|t| t.elapsed().ok()),
+            ) {
+                log::warn!("switch last error: {}", e);
+            }
+            match self.switch_nodes().await {
+                Ok(nodes) => {
+                    if log::log_enabled!(log::Level::Info) {
+                        log::info!(
+                            "Node switch succeeded: {:?}",
+                            nodes.iter().map(|n| n.remark.as_ref()).collect::<Vec<_>>()
+                        );
+                    }
+                    last_switched.replace(nodes);
+                    last_duration.replace(SystemTime::now());
                     continue;
-                } else {
-                    log::info!("switching nodes for received count: {}", received_count);
-                    received_count = 0;
                 }
-                // switch node
-                // 将上次切换的节点重入 stats 权重排序
-                if let Err(e) = self.repush_last(
-                    last_switched.take(),
-                    last_duration.take().and_then(|t| t.elapsed().ok()),
-                ) {
-                    log::warn!("switch last error: {}", e);
-                }
-                match self.switch_nodes().await {
-                    Ok(nodes) => {
-                        if log::log_enabled!(log::Level::Info) {
-                            log::info!(
-                                "Node switch succeeded: {:?}",
-                                nodes.iter().map(|n| n.remark.as_ref()).collect::<Vec<_>>()
-                            );
-                        }
-                        last_switched.replace(nodes);
-                        last_duration.replace(SystemTime::now());
-                        continue;
-                    }
-                    Err(e) => {
-                        log::error!("switch error: {}", e);
-                    }
+                Err(e) => {
+                    log::error!("switch error: {}", e);
                 }
             }
         }
+        Err(anyhow!("channel closed"))
     }
 
     /// 更新node stats为SwitchNodeStat。首次调用将会等待数据可用，之后会在后台更新。

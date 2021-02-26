@@ -10,6 +10,7 @@
 extern crate pnet;
 
 use dns_lookup::lookup_host;
+use log::warn;
 use once_cell::sync::{Lazy, OnceCell};
 use parking_lot::Mutex;
 use pnet::datalink::{self, NetworkInterface};
@@ -51,8 +52,14 @@ fn handle_ethernet_frame(ethernet: &EthernetPacket, ips: &HashSet<IpAddr>) -> Re
             match protocol {
                 IpNextHeaderProtocols::Tcp => {
                     if ips.contains(&source) {
-                        log::trace!("{}: {} <- {}", protocol, source, destination);
-                        Ok(false)
+                        let tcp = TcpPacket::new(header.payload()).ok_or(())?;
+                        if tcp.get_flags() & 4 != 0 {
+                            log::debug!("{} RST: {} <- {}", protocol, destination, source);
+                            Err(())
+                        } else {
+                            log::trace!("{}: {} <- {}", protocol, destination, source);
+                            Ok(false)
+                        }
                     } else if ips.contains(&destination) {
                         log::trace!("{}: {} -> {}", protocol, source, destination);
                         Ok(true)
@@ -131,7 +138,7 @@ impl CheckNetworkTask {
     pub async fn run(
         &self,
         ips_rx: Receiver<Vec<IpAddr>>,
-        switch_sender: Sender<()>,
+        switch_sender: Sender<bool>,
     ) -> anyhow::Result<()> {
         self.update_check_ips(ips_rx).await?;
 
@@ -177,7 +184,7 @@ impl CheckNetworkTask {
                                     self.prop.timeout,
                                     count_failed
                                 );
-                                switch_sender.send(()).await.unwrap();
+                                switch_sender.send(res).await.unwrap();
                             } else {
                                 last.replace(SystemTime::now());
                                 continue;
@@ -187,7 +194,7 @@ impl CheckNetworkTask {
                         last.take();
                     }
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => log::warn!("receive error {} for interface {}", e, self.prop.ifname),
             }
         }
     }
@@ -236,7 +243,7 @@ mod tests {
             DnsFlushTask::new(dns_prop).run(ips_tx).await.unwrap();
         });
 
-        let (tx, mut rx) = channel::<()>(1);
+        let (tx, mut rx) = channel::<bool>(1);
         let prop = get_prop();
         let task = CheckNetworkTask::new(prop);
 
@@ -247,6 +254,18 @@ mod tests {
         });
         task.run(ips_rx, tx).await?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test() {
+        let (ips_tx, mut ips_rx) = channel::<()>(1);
+        loop {
+            log::debug!("test");
+            if ips_rx.recv().await.is_some() {
+                
+            }
+        }
+
     }
 
     fn get_prop() -> CheckNetworkProperty {

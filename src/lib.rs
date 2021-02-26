@@ -73,7 +73,7 @@ impl V2rayTaskManager {
             dns_task.run(ips_tx).await.unwrap();
         });
 
-        let (switch_tx, switch_rx) = channel::<()>(1);
+        let (switch_tx, switch_rx) = channel::<bool>(1);
         let check_task =
             check_network::CheckNetworkTask::new(self.prop.check.take().unwrap());
         tokio::spawn(async move {
