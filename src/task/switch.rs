@@ -38,33 +38,32 @@ use pnet::{
 pub struct SwitchNodeStat {
     pub node: Node,
     pub tcp_stat: TcpPingStatistic,
-    pub serv_duras: Vec<Option<Duration>>,
+    pub weight: usize,
 }
 
 impl SwitchNodeStat {
     pub fn new(node: Node, ps: TcpPingStatistic) -> Self {
         Self {
             node,
+            weight: 0,
             tcp_stat: ps,
-            serv_duras: vec![],
         }
     }
 
-    pub fn push_serv_duration(&mut self, d: Option<Duration>) {
-        self.serv_duras.push(d);
+    pub fn push_serv_duration(&mut self, d: Duration) {
+        static HOUR: Duration = Duration::from_secs(60 * 60);
+        static MINUTE: Duration = Duration::from_secs(60);
+        self.weight += if d < MINUTE {
+            3
+        } else if d < HOUR {
+            2
+        } else {
+            1
+        };
     }
 
     pub fn weight(&self) -> usize {
-        if let Some(avg) = self.tcp_stat.rtt_avg {
-            let total = self.serv_duras.len();
-            let avg = avg.as_millis() as usize;
-            if total == 0 {
-                return avg;
-            }
-            avg * (total + 1)
-        } else {
-            std::usize::MAX
-        }
+        self.weight
     }
 }
 
@@ -168,7 +167,10 @@ impl<V: V2rayService> SwitchTask<V> {
         let (mut switch_count, mut switch_failed_count, start) = (0, 0, SystemTime::now());
         let mut consecutive_failures = 0;
 
-        log::info!("Start monitoring online traffic for interface: {}", monitor.ifname);
+        log::info!(
+            "Start monitoring online traffic for interface: {}",
+            monitor.ifname
+        );
         let mut link_rev = self.find_link_receiver()?;
         loop {
             match link_rev.next() {
@@ -331,7 +333,11 @@ impl<V: V2rayService> SwitchTask<V> {
 
         let update = |ips: Vec<IpAddr>, check_ips: &Arc<Mutex<HashSet<IpAddr>>>| {
             let mut cips = check_ips.lock();
-            log::debug!("Received ips len: {}, last ips len: {}", ips.len(), cips.len());
+            log::debug!(
+                "Received ips len: {}, last ips len: {}",
+                ips.len(),
+                cips.len()
+            );
             log::trace!("updating ips {:?}", ips);
             cips.clear();
             ips.into_iter().for_each(|ip| {
@@ -364,7 +370,7 @@ impl<V: V2rayService> SwitchTask<V> {
             node_stats.len()
         );
 
-        // 更新stats
+        // 更新stats 直接替换之前的数据
         let update = |stats: &SwitchData,
                       node_stats: Vec<(Node, TcpPingStatistic)>,
                       pre_filter: Option<&Arc<NameRegexFilter>>| {
@@ -386,7 +392,7 @@ impl<V: V2rayService> SwitchTask<V> {
         update(&stats, node_stats, pre_filter.as_ref());
 
         tokio::spawn(async move {
-            log::info!("Waiting for nodes stats update in the background");
+            log::debug!("Waiting for nodes stats update in the background");
             while let Some(node_stats) = rx.recv().await {
                 log::debug!("processing received node stats: {}", node_stats.len());
                 update(&stats, node_stats, pre_filter.as_ref());
@@ -453,6 +459,7 @@ impl<V: V2rayService> SwitchTask<V> {
             })?;
             let mut stats = self.stats.lock();
             let mut temp = vec![];
+            // std binary heap不支持有序迭代 使用pop方式在last中找出对应的
             while let Some(mut ns) = stats.pop() {
                 if last.is_empty() {
                     stats.push(ns);
@@ -463,17 +470,24 @@ impl<V: V2rayService> SwitchTask<V> {
                         .enumerate()
                         .find_map(|(i, n)| if n == &ns.node { Some(i) } else { None })
                 {
-                    ns.serv_duras.push(Some(last_duration));
+                    let old_weight = ns.weight();
+                    ns.push_serv_duration(last_duration);
+                    log::trace!(
+                        "tcp node stats {:?} old weight {}, new weight {}",
+                        ns.node.remark.as_ref(),
+                        old_weight,
+                        ns.weight()
+                    );
                     temp.push(ns);
-
                     last.remove(idx);
                 } else {
-                    log::error!(
+                    log::warn!(
                         "not found switch node {:?} in last switched: {:?}",
                         ns.node.remark.as_ref(),
                         last.iter().map(|n| n.remark.as_ref()).collect::<Vec<_>>()
                     );
-                    return Err(anyhow!("not found node in last switched"));
+                    temp.push(ns);
+                    break;
                 }
             }
 
@@ -594,6 +608,8 @@ mod tests {
         let last_switched = Some(vec![first_node.node.clone()]);
         let last_duration = Some(Duration::from_millis(100));
         task.repush_last(last_switched, last_duration)?;
+        // 第一个节点已被修改
+        assert_ne!(task.stats.lock().peek().unwrap().node, first_node.node);
         // 不修改数量
         assert_eq!(task.stats.lock().len(), old_len);
         // 修改weight

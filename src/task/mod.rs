@@ -309,10 +309,10 @@ mod filter {
                 for _ in 0..self.size {
                     if let Some(v) = val.pop() {
                         log::trace!(
-                            "selected node: {:?}, tcp ping rtt avg: {:?}, service durations: {:?}",
+                            "selected node: {:?}, tcp ping rtt avg: {:?}, weight: {:?}",
                             v.node.remark,
                             v.tcp_stat.rtt_avg,
-                            v.serv_duras
+                            v.weight()
                         );
                         nodes.push(v.node.clone());
                         selected.push(v);
