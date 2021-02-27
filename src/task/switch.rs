@@ -154,18 +154,22 @@ impl<V: V2rayService> SwitchTask<V> {
             self.update_node_stats(node_stats_rx)
         )?;
 
-        let mut link_rev = self.find_link_receiver()?;
         self.v2.clean_env().await?;
+        if let Err(e) = self.switch(&mut None, &mut None).await {
+            return Err(anyhow!("failed switched for the first time: {}", e));
+        }
 
         let monitor = &self.prop.monitor;
         // packet上次数据
         let (mut p_timeout_count, mut p_last_time) = (0, None::<SystemTime>);
         // switch上次数据
         let (mut last_nodes, mut last_time) = (None::<Vec<Node>>, None::<SystemTime>);
-
         // 统计数据
         let (mut switch_count, mut switch_failed_count, start) = (0, 0, SystemTime::now());
+        let mut consecutive_failures = 0;
 
+        log::info!("Start monitoring online traffic for interface: {}", monitor.ifname);
+        let mut link_rev = self.find_link_receiver()?;
         loop {
             match link_rev.next() {
                 Ok(packet) => {
@@ -173,7 +177,7 @@ impl<V: V2rayService> SwitchTask<V> {
                         // 收到回复
                         if !is_forword {
                             log::trace!("received reponse. reset timeout count: {} as 0, last elapsed: {:?} as None", 
-                                p_timeout_count, 
+                                p_timeout_count,
                                 p_last_time.as_ref().and_then(|t| t.elapsed().ok())
                             );
                             p_timeout_count = 0;
@@ -192,7 +196,8 @@ impl<V: V2rayService> SwitchTask<V> {
                                 continue;
                             }
                             // switch limit for elapsed
-                            if let Some(elapsed) = last_time.as_ref().and_then(|t| t.elapsed().ok()) {
+                            if let Some(elapsed) = last_time.as_ref().and_then(|t| t.elapsed().ok())
+                            {
                                 let limit_interval = self.prop.limit_interval;
                                 if elapsed < limit_interval {
                                     log::trace!(
@@ -207,7 +212,14 @@ impl<V: V2rayService> SwitchTask<V> {
                             // switch
                             if let Err(e) = self.switch(&mut last_nodes, &mut last_time).await {
                                 switch_failed_count += 1;
-                                log::error!("switch error: {}", e);
+                                consecutive_failures += 1;
+                                log::warn!("switch error: {}", e);
+                                if consecutive_failures > 3 {
+                                    log::error!("Continuous switch failure found, check the running environment");
+                                    self.v2.clean_env().await?;
+                                }
+                            } else {
+                                consecutive_failures = 0;
                             }
                             // 每10次报告一次
                             if switch_count % 10 == 0 {
@@ -228,7 +240,11 @@ impl<V: V2rayService> SwitchTask<V> {
         last_nodes: &mut Option<Vec<Node>>,
         last_time: &mut Option<SystemTime>,
     ) -> Result<()> {
-        log::debug!("Start switching nodes for last_nodes: {:?}, last_duration: {:?}", last_nodes, last_time.as_ref().and_then(|t| t.elapsed().ok()));
+        log::debug!(
+            "Start switching nodes for last_nodes: {:?}, last_duration: {:?}",
+            last_nodes,
+            last_time.as_ref().and_then(|t| t.elapsed().ok())
+        );
         self.repush_last(
             last_nodes.take(),
             last_time.take().and_then(|t| t.elapsed().ok()),
@@ -257,10 +273,10 @@ impl<V: V2rayService> SwitchTask<V> {
                     .await?,
             )
             .await?;
-
         last_nodes.replace(nodes);
         last_time.replace(SystemTime::now());
 
+        let last_nodes = last_nodes.as_ref().unwrap();
         if let Err(e) = self
             .check_retry_srv
             .retry_on(|| self.check_network(), false)
@@ -270,8 +286,6 @@ impl<V: V2rayService> SwitchTask<V> {
                 "The network still fails: {}, after switching nodes: {:?}",
                 e,
                 last_nodes
-                    .as_ref()
-                    .unwrap()
                     .iter()
                     .map(|n| n.remark.as_ref())
                     .collect::<Vec<_>>()
@@ -282,11 +296,11 @@ impl<V: V2rayService> SwitchTask<V> {
         if log::log_enabled!(log::Level::Info) {
             log::info!(
                 "Node switch succeeded: {:?}",
-                last_nodes
-                    .as_ref()
-                    .unwrap()
+                self.stats
+                    .lock()
                     .iter()
-                    .map(|n| n.remark.as_ref())
+                    .filter(|ns| last_nodes.contains(&ns.node))
+                    .map(|ns| (ns.node.remark.as_ref(), ns.tcp_stat.rtt_avg.as_ref()))
                     .collect::<Vec<_>>()
             );
         }
@@ -309,15 +323,16 @@ impl<V: V2rayService> SwitchTask<V> {
     }
 
     async fn update_check_ips(&self, mut ips_rx: Receiver<Vec<IpAddr>>) -> Result<()> {
-        log::trace!("Waiting for the first update of ips");
+        log::debug!("Waiting for the first update of ips");
         let ips = ips_rx
             .recv()
             .await
             .ok_or_else(|| anyhow!("receive error"))?;
 
         let update = |ips: Vec<IpAddr>, check_ips: &Arc<Mutex<HashSet<IpAddr>>>| {
-            log::debug!("Received ips: {:?}", ips);
             let mut cips = check_ips.lock();
+            log::debug!("Received ips len: {}, last ips len: {}", ips.len(), cips.len());
+            log::trace!("updating ips {:?}", ips);
             cips.clear();
             ips.into_iter().for_each(|ip| {
                 cips.insert(ip);

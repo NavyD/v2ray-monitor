@@ -7,6 +7,7 @@ use super::find_v2ray_bin_path;
 #[serde(deny_unknown_fields)]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct V2rayTaskProperty {
+    #[serde(default)]
     pub tcp_ping: TcpPingTaskProperty,
     pub subx: SubscriptionTaskProperty,
     pub switch: SwitchTaskProperty,
@@ -79,6 +80,18 @@ fn default_tcpping_retry() -> RetryProperty {
     }
 }
 
+impl Default for TcpPingTaskProperty {
+    fn default() -> Self {
+        Self {
+            update_interval: default_tcpping_update_interval(),
+            filter: Default::default(),
+            retry: default_tcpping_retry(),
+            ping: Default::default(),
+            v2_type: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SwitchFilterProperty {
     pub lb_nodes_size: u8,
@@ -118,10 +131,10 @@ fn default_switch_check_timeout() -> Duration {
 }
 fn default_switch_check_retry() -> RetryProperty {
     RetryProperty {
-        count: 3,
+        count: 7,
         interval_algo: RetryIntevalAlgorithm::Beb {
-            min: Duration::from_secs(1),
-            max: Duration::from_secs(10),
+            min: Duration::from_millis(100),
+            max: Duration::from_secs(2),
         },
         half: None,
         once_timeout: None,

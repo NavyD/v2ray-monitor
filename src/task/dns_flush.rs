@@ -55,7 +55,7 @@ impl HostDnsFlushTask {
             .map(|host| lookup_host(host).unwrap())
             .flatten()
             .collect::<Vec<_>>();
-        log::debug!("sending updated ips: {:?}", ips);
+        log::trace!("sending updated ips len: {}, {:?}", ips.len(), ips);
         tx.send(ips).await.map_err(Into::into)
     }
 }
