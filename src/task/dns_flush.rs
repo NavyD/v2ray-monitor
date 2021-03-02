@@ -52,7 +52,7 @@ impl HostDnsFlushTask {
             .prop
             .hosts
             .iter()
-            .map(|host| lookup_host(host).unwrap())
+            .flat_map(|host| lookup_host(host))
             .flatten()
             .collect::<Vec<_>>();
         log::trace!("sending updated ips len: {}, {:?}", ips.len(), ips);
@@ -60,28 +60,29 @@ impl HostDnsFlushTask {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use std::time::Duration;
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
 
-//     use tokio::sync::mpsc::channel;
+    use tokio::{sync::mpsc::channel, time::timeout};
 
-//     use super::*;
+    use super::*;
 
-//     #[tokio::test]
-//     async fn basic() -> Result<()> {
-//         let prop = DnsFlushProperty {
-//             update_interval: Duration::from_secs(2),
-//             ..Default::default()
-//         };
-//         let task = HostDnsFlushTask::new(prop);
-//         let (tx, mut rx) = channel::<Vec<IpAddr>>(1);
-//         tokio::spawn(async move {
-//             while let Some(v) = rx.recv().await {
-//                 log::debug!("ips: {:?}", v);
-//             }
-//         });
-//         task.run(tx).await?;
-//         Ok(())
-//     }
-// }
+    #[tokio::test]
+    async fn basic() -> Result<()> {
+        let prop = DnsFlushProperty {
+            hosts: vec![
+                "www.google.com".to_string(),
+                "www.youtube.com".to_string(),
+                "github.com".to_string(),
+            ],
+            ..Default::default()
+        };
+        let task = HostDnsFlushTask::new(prop);
+        let (tx, mut rx) = channel::<Vec<IpAddr>>(1);
+        timeout(Duration::from_secs(4), task.update(&tx)).await??;
+        let v = rx.recv().await.unwrap();
+        assert!(!v.is_empty());
+        Ok(())
+    }
+}

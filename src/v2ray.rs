@@ -4,14 +4,16 @@ pub mod node;
 use crate::task::v2ray_task_config::*;
 use async_trait::async_trait;
 
+use double_checked_cell_async::DoubleCheckedCell;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use regex::Regex;
-use std::{collections::HashMap, fs, process::Stdio, sync::Arc};
+use std::{collections::HashMap, fs, path::Path, process::Stdio, sync::Arc};
 
 use anyhow::{anyhow, Result};
 
 use tokio::{
+    fs::read_to_string,
     io::*,
     net::TcpListener,
     process::{Child, Command},
@@ -20,6 +22,10 @@ use tokio::{
 use self::node::Node;
 
 #[async_trait]
+#[deprecated(
+    since = "0.4.3",
+    note = "Separate configuration into v2ra and config modules"
+)]
 pub trait ConfigurableV2ray {
     async fn get_config(&self) -> Result<&str>;
 
@@ -762,4 +768,440 @@ bin_path: /usr/bin/v2ray
     //     )
     //     .unwrap()
     // }
+}
+
+mod new {
+    use super::*;
+
+    #[async_trait]
+    pub trait V2rayService: Send + Sync {
+        async fn get_config(&self) -> Result<&str>;
+
+        /// 在后台启动v2ray。在V2rayService被drop后应该自动关闭所有由该service启动的v2ray实例
+        async fn start_in_background(&self, config: &str) -> Result<u32>;
+
+        /// 停止指定port上的v2ray进程。如果不存在也不会返回错误
+        async fn stop_by_port(&self, port: &u16) -> Result<()>;
+
+        async fn stop_by_pid(&self, pid: &u32) -> Result<()>;
+
+        async fn stop_all(&self) -> Result<()>;
+
+        async fn get_available_port(&self) -> Result<u16>;
+
+        async fn clean_env(&self) -> Result<()>;
+
+        /// 在系统中判断指定v2ray pid是否存在
+        async fn is_running(&self, pid: u32) -> Result<bool>;
+
+        fn get_host(&self) -> &str;
+    }
+
+    struct LocalV2rayService {
+        config: DoubleCheckedCell<String>,
+        port_children: Arc<Mutex<HashMap<u16, Child>>>,
+        prop: LocalV2rayProperty,
+    }
+
+    impl LocalV2rayService {
+        pub fn new(prop: LocalV2rayProperty) -> Self {
+            Self {
+                prop,
+                config: DoubleCheckedCell::new(),
+                port_children: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        /// 从bin path中使用config启动v2ray 并返回子进程 由用户控制
+        async fn start(&self, config: &str) -> Result<Child> {
+            if log::log_enabled!(log::Level::Trace) {
+                let port = config::get_port(config)?;
+                log::trace!("starting v2ray on port {}", port);
+            }
+            let mut child = Command::new(&self.prop.bin_path)
+                .arg("-config")
+                .arg("stdin:")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()?;
+
+            // 写完stdin后drop避免阻塞
+            child
+                .stdin
+                .take()
+                .expect("stdin get error")
+                .write_all(config.as_bytes())
+                .await?;
+
+            // 2. check start with output
+            check_v2ray_start(
+                child
+                    .stdout
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("not found command stdout"))?,
+            )
+            .await?;
+            log::trace!("v2ray start successful");
+            Ok(child)
+        }
+    }
+
+    #[async_trait]
+    impl V2rayService for LocalV2rayService {
+        async fn get_config(&self) -> Result<&str> {
+            self.config
+                .get_or_try_init(async {
+                    let path = self.prop.config_path.as_ref().unwrap();
+                    log::debug!("loading config from local path: {}", path);
+                    read_to_string(path).await
+                })
+                .await
+                .map(String::as_str)
+                .map_err(Into::into)
+        }
+
+        async fn start_in_background(&self, config: &str) -> Result<u32> {
+            // check duplicate v2ray in port
+            let port = config::get_port(config)?;
+            if let Some(child) = self.port_children.lock().get(&port) {
+                log::error!(
+                    "found v2ray process {:?} started in port {}",
+                    child.id(),
+                    port
+                );
+                return Err(anyhow!("duplicate v2ray process in port: {}", port));
+            }
+            // start v2ray
+            let child = self.start(config).await?;
+            let pid = child.id().ok_or_else(|| anyhow!("not found process id"))?;
+            log::debug!("successfully start v2ray process {} on port {}", pid, port);
+            self.port_children.lock().insert(port, child);
+            Ok(pid)
+        }
+
+        async fn stop_by_port(&self, port: &u16) -> Result<()> {
+            let mut child = self.port_children.lock().remove(&port);
+            if let Some(child) = child.as_mut() {
+                log::debug!(
+                    "killing cached v2ray id: {:?} in port: {}",
+                    child.id(),
+                    port
+                );
+                child.kill().await?;
+            } else {
+                log::debug!("no v2ray process in port: {}", port);
+            }
+            Ok(())
+        }
+
+        async fn stop_by_pid(&self, pid: &u32) -> Result<()> {
+            let port = self
+                .port_children
+                .lock()
+                .iter()
+                .find(|(_, v)| v.id() == Some(*pid))
+                .map(|(k, _)| *k);
+            if let Some(port) = port {
+                self.stop_by_port(&port).await?;
+            }
+            Ok(())
+        }
+
+        async fn stop_all(&self) -> Result<()> {
+            todo!()
+        }
+
+        async fn get_available_port(&self) -> Result<u16> {
+            todo!()
+        }
+
+        async fn clean_env(&self) -> Result<()> {
+            todo!()
+        }
+
+        fn get_host(&self) -> &str {
+            todo!()
+        }
+
+        async fn is_running(&self, pid: u32) -> Result<bool> {
+            Ok(Path::new(&format!("/proc/{}", pid)).exists())
+            // exe(&format!("kill -0 {}", pid)).await.map(|s| !s.is_empty())
+        }
+    }
+
+    struct SshV2rayService {
+        config: DoubleCheckedCell<String>,
+        prop: SshV2rayProperty,
+        port_pids: Arc<Mutex<HashMap<u16, u32>>>,
+        pid_regex: OnceCell<Regex>,
+    }
+
+    impl Drop for SshV2rayService {
+        fn drop(&mut self) {
+            let delimiter = ",";
+            let mut cmd =
+                self.port_pids
+                    .lock()
+                    .values()
+                    .fold("kill -9 ".to_string(), |mut s, pid| {
+                        s.push_str(&format!("{}{}", pid, delimiter));
+                        s
+                    });
+            cmd.truncate(cmd.len() - delimiter.len());
+            log::debug!(
+                "Killing all v2ray processes `{}` when sshv2ray is dropped",
+                cmd
+            );
+            let out = std::process::Command::new("ssh")
+                .arg(&self.ssh_addr())
+                .arg(&cmd)
+                .output()
+                .unwrap();
+            if out.status.success() {
+                log::trace!("kill successful: {}", String::from_utf8_lossy(&out.stdout));
+            } else {
+                log::warn!("kill failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+    }
+
+    impl SshV2rayService {
+        pub fn new(prop: SshV2rayProperty) -> Self {
+            Self {
+                prop,
+                config: DoubleCheckedCell::new(),
+                port_pids: Arc::new(Mutex::new(HashMap::new())),
+                pid_regex: OnceCell::new(),
+            }
+        }
+
+        fn ssh_addr(&self) -> String {
+            format!("{}@{}", self.prop.username, self.prop.host)
+        }
+
+        async fn ssh_exe(&self, sh_cmd: &str) -> Result<String> {
+            exe_arg(
+                &format!("ssh {}@{}", self.prop.username, self.prop.host),
+                sh_cmd,
+            )
+            .await
+        }
+
+        /// 从`jobs -l`的输出中解析出当前shell后台运行的pid
+        fn parse_pid_from_jobs_l(&self, s: &str) -> Result<u32> {
+            let regex = self
+                .pid_regex
+                .get_or_try_init(|| Regex::new(r"(\d+)\s+running"))?;
+            let caps = regex
+                .captures(&s)
+                .ok_or_else(|| anyhow!("not matched pid regex: {} for input: {}", regex, s))?;
+            if caps.len() != 2 {
+                log::error!(
+                    "pid regex {} found multiple configuration items: {:?}",
+                    regex,
+                    caps,
+                );
+                return Err(anyhow!("pid regex found multiple configuration items"));
+            }
+            caps[1].parse::<u32>().map_err(Into::into)
+        }
+    }
+
+    #[async_trait]
+    impl V2rayService for SshV2rayService {
+        async fn get_config(&self) -> Result<&str> {
+            self.config
+                .get_or_try_init(async {
+                    // scp get content
+                    let sh_cmd = format!(
+                        "scp {}@{}:{} /dev/stdout",
+                        self.prop.username, self.prop.host, self.prop.config_path
+                    );
+                    log::debug!("loading config from ssh command: {}", sh_cmd);
+                    let args = sh_cmd.split(' ').collect::<Vec<_>>();
+                    let out = Command::new(args[0]).args(&args[1..]).output().await?;
+                    if !out.status.success() {
+                        let msg = String::from_utf8_lossy(&out.stderr);
+                        log::error!("get config from ssh {} error: {}", sh_cmd, msg);
+                        Err(anyhow!("get config ssh error: {}", msg))
+                    } else {
+                        String::from_utf8(out.stdout).map_err(Into::into)
+                    }
+                })
+                .await
+                .map(String::as_str)
+        }
+
+        async fn start_in_background(&self, config: &str) -> Result<u32> {
+            // check if port exists
+            let port = config::get_port(config)?;
+            if let Some(pid) = self.port_pids.lock().get(&port) {
+                log::error!("found v2ray process {} started in port {}", pid, port);
+                return Err(anyhow!("duplicate v2ray process in port: {}", port));
+            }
+            let sh_cmd = format!(
+                "echo '{}' | nohup v2ray -config stdin: &> /dev/null &; jobs -l",
+                config,
+            );
+            let out = exe_arg(&format!("ssh {}", self.ssh_addr()), &sh_cmd).await?;
+            let pid = self.parse_pid_from_jobs_l(&out)?;
+            self.port_pids.lock().insert(port, pid);
+            log::debug!(
+                "v2ray successfully started in the background. pid: {}, port: {}",
+                pid,
+                port
+            );
+            Ok(pid)
+        }
+
+        async fn stop_by_port(&self, port: &u16) -> Result<()> {
+            todo!()
+        }
+
+        /// 在background时读取进程id保存，然后ssh kill
+        async fn stop_by_pid(&self, pid: &u32) -> Result<()> {
+            let port_pid = self
+                .port_pids
+                .lock()
+                .iter()
+                .find(|(_, v)| *v == pid)
+                .map(|(k, v)| (*k, *v));
+            if let Some((port, pid)) = port_pid {
+                if let Err(e) = self.ssh_exe(&format!("kill -9 {}", pid)).await {
+                    log::info!("stop v2ray {} failed: {} on port {}", pid, e, port);
+                } else {
+                    self.port_pids.lock().remove(&port);
+                    log::debug!(
+                        "successfully kill v2ray process id: {} on port: {}",
+                        pid,
+                        port
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        async fn stop_all(&self) -> Result<()> {
+            todo!()
+        }
+
+        async fn get_available_port(&self) -> Result<u16> {
+            todo!()
+        }
+
+        async fn clean_env(&self) -> Result<()> {
+            todo!()
+        }
+
+        fn get_host(&self) -> &str {
+            todo!()
+        }
+
+        async fn is_running(&self, pid: u32) -> Result<bool> {
+            match self
+                .ssh_exe(&format!("kill -0 {}", pid))
+                .await
+                .map(|s| s.is_empty())
+            {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    if e.to_string().contains("no such process") {
+                        Ok(false)
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod new_tests {
+        use std::path::Path;
+
+        use once_cell::sync::Lazy;
+
+        use crate::task::find_v2ray_bin_path;
+
+        use super::V2rayService;
+        use super::*;
+
+        #[tokio::test]
+        async fn load_config() -> Result<()> {
+            async fn test(v2: &impl V2rayService) -> Result<()> {
+                let prev = v2.get_config().await?;
+                let cur = v2.get_config().await?;
+                assert_eq!(prev, cur);
+                Ok(())
+            };
+            test(SSH_V2.as_ref()).await?;
+            // test(LOCAL_V2.as_ref()).await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn normal_start() -> Result<()> {
+            async fn test(v2: &impl V2rayService) -> Result<()> {
+                let config = v2.get_config().await?;
+                let pid = v2.start_in_background(config).await?;
+                assert!(v2.is_running(pid).await?);
+                Ok(())
+            }
+            // test(LOCAL_V2.as_ref()).await?;
+            test(SSH_V2.as_ref()).await?;
+            Ok(())
+        }
+        #[tokio::test]
+        async fn killall_v2ray_when_ssh_v2ray_service_drop() -> Result<()> {
+            let pid = {
+                let v2 = SshV2rayService::new(SSH_V2.prop.clone());
+                let config = v2.get_config().await?;
+                let pid = v2.start_in_background(config).await?;
+                assert!(v2.is_running(pid).await?);
+                pid
+            };
+            assert!(!SSH_V2.is_running(pid).await?);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn stop_pid_normal() -> Result<()> {
+            async fn test(v2: &impl V2rayService) -> Result<()> {
+                let config = v2.get_config().await?;
+                let pid = v2.start_in_background(config).await?;
+                assert!(v2.is_running(pid).await?);
+                v2.stop_by_pid(&pid).await?;
+                assert!(!v2.is_running(pid).await?);
+                Ok(())
+            }
+            // test(LOCAL_V2.as_ref()).await?;
+            test(SSH_V2.as_ref()).await?;
+            Ok(())
+        }
+
+        static SSH_V2: Lazy<Arc<SshV2rayService>> = Lazy::new(|| {
+            let content = r#"
+username: root
+host: 192.168.93.2
+config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
+bin_path: /usr/bin/v2ray
+        "#;
+            let prop = serde_yaml::from_str::<SshV2rayProperty>(content).unwrap();
+            Arc::new(SshV2rayService::new(prop))
+        });
+
+        static LOCAL_V2: Lazy<Arc<LocalV2rayService>> = Lazy::new(|| {
+            let prop = LocalV2rayProperty {
+                bin_path: find_v2ray_bin_path().unwrap(),
+                config_path: Some(
+                    Path::new("tests/data")
+                        .join("local-v2-config.json")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            };
+            Arc::new(LocalV2rayService::new(prop))
+        });
+    }
 }
