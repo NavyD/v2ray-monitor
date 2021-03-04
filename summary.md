@@ -88,3 +88,19 @@ async fn test() {
 
 * [how to init with async method](https://github.com/matklad/once_cell/issues/108)
 * [alternative to using 'await' with lazy_static! macro in rust?](https://stackoverflow.com/questions/62351945/alternative-to-using-await-with-lazy-static-macro-in-rust)
+
+### 在异步中RAII
+
+> To be honest, the idiomatic way is to design your code such that you don't need async drop
+
+参考：
+
+* [Asynchronous Destructors](https://internals.rust-lang.org/t/asynchronous-destructors/11127)
+* [What is the idiomatic way of cleaning up async resources in rust?](https://users.rust-lang.org/t/what-is-the-idiomatic-way-of-cleaning-up-async-resources-in-rust/48878)
+* [How do I implement an async Drop in Rust?](https://stackoverflow.com/questions/59782278/how-do-i-implement-an-async-drop-in-rust)
+* [scopeguard](https://github.com/bluss/scopeguard)
+
+可能的解决方法：
+
+* [A practical introduction to async programming in Rust](http://jamesmcm.github.io/blog/2020/05/06/a-practical-introduction-to-async-programming-in-rust/)
+* [Atomic renames and asynchronous destructors #16](https://github.com/jamesmcm/s3rename/issues/16)

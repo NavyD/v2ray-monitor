@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     tcp_ping::{self, TcpPingStatistic},
-    v2ray::{node::Node, V2rayService},
+    v2ray::{node::Node, new::V2rayService},
 };
 use anyhow::{anyhow, Result};
 
@@ -17,16 +17,16 @@ use tokio::{
     time,
 };
 
-pub struct TcpPingTask<V: V2rayService> {
+pub struct TcpPingTask {
     // nodes:
     prop: TcpPingTaskProperty,
     nodes: Arc<Mutex<Vec<Node>>>,
-    v2: V,
+    v2: Arc<dyn V2rayService>,
     pre_filter: Option<Arc<NameRegexFilter>>,
 }
 
-impl<V: V2rayService> TcpPingTask<V> {
-    pub fn new(prop: TcpPingTaskProperty, v2: V) -> Self {
+impl TcpPingTask {
+    pub fn new(prop: TcpPingTaskProperty, v2: Arc<dyn V2rayService>) -> Self {
         Self {
             v2,
             nodes: Arc::new(Mutex::new(vec![])),
@@ -75,11 +75,11 @@ impl<V: V2rayService> TcpPingTask<V> {
         let retry_srv = RetryService::new(self.prop.retry.clone());
 
         let task = {
-            let v2 = self.v2.clone();
+            // let v2 = self.v2.clone();
             let nodes = self.nodes.clone().lock().clone();
             let ping_prop = self.prop.ping.clone();
             // let tx = tx.clone();
-            Arc::new(move || dotask(v2.clone(), nodes.clone(), ping_prop.clone(), tx.clone()))
+            Arc::new(move || dotask(self.v2.clone(), nodes.clone(), ping_prop.clone(), tx.clone()))
         };
         let mut interval = time::interval(self.prop.update_interval);
         loop {
@@ -95,8 +95,8 @@ impl<V: V2rayService> TcpPingTask<V> {
         }
     }
 }
-async fn dotask<V: V2rayService>(
-    v2: V,
+async fn dotask(
+    v2: Arc<dyn V2rayService>,
     nodes: Vec<Node>,
     ping_prop: PingProperty,
     tx: Sender<Vec<(Node, TcpPingStatistic)>>,
@@ -128,20 +128,18 @@ async fn dotask<V: V2rayService>(
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        task::{find_v2ray_bin_path, v2ray_task_config::LocalV2rayProperty},
-        v2ray::LocalV2ray,
-    };
+    use crate::{task::{find_v2ray_bin_path, v2ray_task_config::LocalV2rayProperty}, v2ray::{LocalV2ray, new::LocalV2rayService}};
 
     use super::*;
 
     #[tokio::test]
     async fn basic() -> Result<()> {
-        let _v2 = LocalV2ray::new(get_local_prop()?);
-        let _prop = get_tcp_ping_task_prop()?;
-        // let a = TcpPingTask::new(prop, v2, None);
-        // a.run().await?;
+       
         Ok(())
+    }
+
+    fn local_v2() -> Arc<dyn V2rayService> {
+        Arc::new(LocalV2rayService::new(get_local_prop().unwrap()))
     }
 
     fn get_local_prop() -> Result<LocalV2rayProperty> {
@@ -149,9 +147,5 @@ mod tests {
             bin_path: find_v2ray_bin_path()?,
             config_path: Some("tests/data/local-v2-config.json".to_string()),
         })
-    }
-
-    fn get_tcp_ping_task_prop() -> Result<TcpPingTaskProperty> {
-        todo!()
     }
 }

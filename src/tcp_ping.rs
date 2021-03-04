@@ -1,6 +1,6 @@
-use crate::v2ray::V2rayService;
+use crate::v2ray::config;
+use crate::v2ray::new::{V2rayService, LocalV2rayService};
 use crate::{task::v2ray_task_config::*, v2ray::node::Node};
-
 use std::{
     cmp::Ordering,
     sync::Arc,
@@ -99,8 +99,8 @@ impl TcpPingStatistic {
 
 /// 对nodes节点批量ping返回能ping通的节点与不可通的节点。
 ///
-pub async fn ping_batch<'a, T: V2rayService + 'static>(
-    v2: T,
+pub async fn ping_batch(
+    v2: Arc<dyn V2rayService>,
     nodes: Vec<Node>,
     prop: &PingProperty,
 ) -> Result<(Vec<(Node, TcpPingStatistic)>, Option<Vec<Node>>)> {
@@ -115,7 +115,8 @@ pub async fn ping_batch<'a, T: V2rayService + 'static>(
     let semaphore = Arc::new(Semaphore::new(concurr_num));
     let start = Instant::now();
     for node in nodes {
-        let (prop, semaphore, tx, v2) = (prop.clone(), semaphore.clone(), tx.clone(), v2.clone());
+        let (prop, semaphore, tx) = (prop.clone(), semaphore.clone(), tx.clone());
+        let v2 = v2.clone();
         tokio::spawn(async move {
             let ps = if let Err(e) = semaphore.acquire().await {
                 log::error!(
@@ -160,8 +161,8 @@ pub async fn ping_batch<'a, T: V2rayService + 'static>(
     Ok((nodes, err_nodes))
 }
 
-async fn ping_task<T: V2rayService>(
-    v2: T,
+async fn ping_task<'a>(
+    v2: Arc<dyn V2rayService + 'a>,
     node: &Node,
     prop: &PingProperty,
 ) -> Result<TcpPingStatistic> {
@@ -169,14 +170,14 @@ async fn ping_task<T: V2rayService>(
     let mut durations: Vec<Option<Duration>> = vec![None; count as usize];
 
     let port = v2.get_available_port().await?;
-    let config = v2.gen_ping_config(node, port).await?;
-    let proxy_url = v2.get_proxy_url(&config)?;
+    let config = config::gen_tcp_ping_config(node, port)?;
+    let proxy_url = config::get_proxy_url(&config, v2.get_host())?;
     v2.start_in_background(&config).await?;
 
-    let client = proxy_url
-        .as_ref()
-        .map(|url| Proxy::all(url).map(|proxy| reqwest::Client::builder().proxy(proxy)))
-        .unwrap_or_else(|| Ok(reqwest::Client::builder()))?
+    let client = Proxy::all(&proxy_url)
+        .map_or(reqwest::Client::builder(), |proxy| {
+            reqwest::Client::builder().proxy(proxy)
+        })
         .timeout(timeout)
         .build()?;
 
@@ -225,7 +226,7 @@ async fn ping_task<T: V2rayService>(
         node.remark
     );
 
-    v2.stop(port).await?;
+    v2.stop_by_port(&port).await?;
     let ps = TcpPingStatistic::new(durations);
     if !ps.is_accessible() {
         log::trace!(
@@ -254,10 +255,8 @@ async fn calculate_duration(client: &Client, url: &str) -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-
-    use crate::v2ray::LocalV2ray;
+    use once_cell::sync::Lazy;
     use crate::{task::find_v2ray_bin_path, v2ray::node};
-
     use super::*;
 
     #[test]
@@ -266,11 +265,9 @@ mod tests {
     #[tokio::test]
     async fn ping_test() -> Result<()> {
         let node = get_node();
-        let v2 = LocalV2ray::new(get_local_prop()?);
-        let ping_prop = get_ping_prop()?;
-
-        let stats = ping_task(v2, &node, &ping_prop).await?;
-        assert_eq!(stats.durations.len(), ping_prop.count as usize);
+        let v2 = local_v2();
+        let stats = ping_task(v2, &node, &PING_PROP).await?;
+        assert_eq!(stats.durations.len(), PING_PROP.count as usize);
         assert!(stats.is_accessible());
         Ok(())
     }
@@ -280,8 +277,8 @@ mod tests {
         let node = get_node();
         let nodes = vec![node];
         let old_len = nodes.len();
-        let v2 = LocalV2ray::new(get_local_prop()?);
-        let ping_prop = get_ping_prop()?;
+        let v2 = local_v2();
+        let ping_prop = &PING_PROP;
 
         let (nps, err_nodes) = ping_batch(v2, nodes, &ping_prop).await?;
         assert!(err_nodes.is_none());
@@ -292,14 +289,14 @@ mod tests {
 
     #[tokio::test]
     async fn ping_batch_from_more() -> Result<()> {
-        let sub_path = "tests/data/v2ray-subscription.txt";
+        let sub_path = "v2ray-subscription.txt";
         let mut nodes = node::load_subscription_nodes_from_file(sub_path).await?;
-        let nodes = nodes.drain(..).into_iter().collect::<Vec<_>>();
+        let nodes = nodes.drain(..).collect::<Vec<_>>();
         let old_len = nodes.len();
 
-        let v2 = LocalV2ray::new(get_local_prop()?);
-        let mut ping_prop = get_ping_prop()?;
-        ping_prop.concurr_num = old_len / 5;
+        let v2 = local_v2();
+        let mut ping_prop = PING_PROP.clone();
+        ping_prop.concurr_num = 24;
 
         let (nps, err_nodes) = ping_batch(v2, nodes, &ping_prop).await?;
         if let Some(enodes) = err_nodes {
@@ -309,6 +306,10 @@ mod tests {
         }
         assert!(nps.iter().any(|(_, ps)| ps.is_accessible()));
         Ok(())
+    }
+
+    fn local_v2() -> Arc<dyn V2rayService> {
+        Arc::new(LocalV2rayService::new(get_local_prop().unwrap()))
     }
 
     fn get_local_prop() -> Result<LocalV2rayProperty> {
@@ -323,26 +324,13 @@ mod tests {
         })
     }
 
-    fn get_ping_prop() -> Result<PingProperty> {
+    static PING_PROP: Lazy<PingProperty> = Lazy::new(|| {
         let content = r#"
-count: 3
-ping_url: https://www.google.com/gen_204
-timeout:
-    secs: 1
-    nanos: 5000000
-#concurr_num: 50"#;
-        Ok(serde_yaml::from_str::<PingProperty>(content)?)
-    }
-
-    fn get_ssh_prop() -> Result<SshV2rayProperty> {
-        let content = r#"
-username: root
-host: 192.168.93.2
-config_path: /var/etc/ssrplus/tcp-only-ssr-retcp.json
-bin_path: /usr/bin/v2ray
-"#;
-        Ok(serde_yaml::from_str::<SshV2rayProperty>(content)?)
-    }
+tcp_ping:
+filter:
+    name_regex: "→香港""#;
+        serde_yaml::from_str::<PingProperty>(content).unwrap()
+    });
 
     fn get_node() -> Node {
         serde_json::from_str(
@@ -350,30 +338,30 @@ bin_path: /usr/bin/v2ray
         )
         .unwrap()
     }
+        // #[tokio::test]
+        // async fn tcp_ping_error_when_node_unavailable() -> Result<()> {
+        //     let mut node = get_node();
+        //     node.add = Some("test.host.addr".to_owned());
+    
+        //     let vp = V2rayProperty::default();
+        //     let pp = PingProperty::default();
+        //     let local_port = get_available_port().await?;
+        //     let config = gen_tcp_ping_config(&node, local_port)?;
+        //     let bin_path = vp
+        //         .bin_path
+        //         .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
+    
+        //     let stats = tcp_ping(&bin_path, &config, local_port, &pp).await?;
+    
+        //     assert_eq!(
+        //         stats.durations.len(),
+        //         PingProperty::default().count as usize
+        //     );
+        //     assert_eq!(stats.durations.iter().filter(|d| d.is_some()).count(), 0);
+        //     Ok(())
+        // }
 }
 
-//     #[tokio::test]
-//     async fn tcp_ping_error_when_node_unavailable() -> Result<()> {
-//         let mut node = get_node();
-//         node.add = Some("test.host.addr".to_owned());
-
-//         let vp = V2rayProperty::default();
-//         let pp = PingProperty::default();
-//         let local_port = get_available_port().await?;
-//         let config = gen_tcp_ping_config(&node, local_port)?;
-//         let bin_path = vp
-//             .bin_path
-//             .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
-
-//         let stats = tcp_ping(&bin_path, &config, local_port, &pp).await?;
-
-//         assert_eq!(
-//             stats.durations.len(),
-//             PingProperty::default().count as usize
-//         );
-//         assert_eq!(stats.durations.iter().filter(|d| d.is_some()).count(), 0);
-//         Ok(())
-//     }
 
 //     static INIT: Once = Once::new();
 

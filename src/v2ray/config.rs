@@ -70,6 +70,12 @@ pub fn apply_config_value(
     Ok(value.to_string())
 }
 
+pub fn apply_port(contents: &str, port: u16) -> Result<String> {
+    let mut value = to_value(contents)?;
+    apply(&mut value, "inbound.port", json!(port))?;
+    Ok(value.to_string())
+}
+
 pub fn apply_config(contents: &str, nodes: &[&Node], local_port: Option<u16>) -> Result<String> {
     apply_config_value(&mut to_value(contents)?, nodes, local_port)
 }

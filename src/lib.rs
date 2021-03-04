@@ -1,4 +1,4 @@
-use std::{net::IpAddr, path::Path};
+use std::{net::IpAddr, path::Path, sync::Arc};
 
 use anyhow::Result;
 use task::{
@@ -10,7 +10,10 @@ use task::{
     v2ray_task_config::{V2rayTaskProperty, V2rayType},
 };
 use tokio::{fs::read_to_string, sync::mpsc::channel};
-use v2ray::{LocalV2ray, SshV2ray};
+use v2ray::{
+    new::{LocalV2rayService, SshV2rayService, V2rayService},
+    LocalV2ray, SshV2ray,
+};
 mod client;
 pub mod task;
 mod tcp_ping;
@@ -18,15 +21,15 @@ pub mod v2ray;
 
 pub struct V2rayTaskManager {
     prop: V2rayTaskProperty,
-    local_v2: LocalV2ray,
-    ssh_v2: Option<SshV2ray>,
+    local_v2: Arc<dyn V2rayService>,
+    ssh_v2: Arc<dyn V2rayService>,
 }
 
 impl V2rayTaskManager {
     pub fn new(prop: V2rayTaskProperty) -> Self {
         Self {
-            local_v2: LocalV2ray::new(prop.v2ray.local.clone()),
-            ssh_v2: prop.v2ray.ssh.clone().map(SshV2ray::new),
+            local_v2: Arc::new(LocalV2rayService::new(prop.v2ray.local.clone())),
+            ssh_v2: Arc::new(SshV2rayService::new(prop.v2ray.ssh.clone().unwrap())),
             prop,
         }
     }
@@ -37,34 +40,30 @@ impl V2rayTaskManager {
         Ok(Self::new(config))
     }
 
+    fn get_v2(&self, ty: &V2rayType) -> Arc<dyn V2rayService> {
+        match ty {
+            V2rayType::Local => self.local_v2.clone(),
+            V2rayType::Ssh => self.ssh_v2.clone(),
+        }
+    }
+
     pub async fn run(&mut self) {
         // start subscription task
         let (nodes_tx, nodes_rx) = channel(1);
-        let subscpt = self.prop.subx.clone();
+        let subx = self.prop.subx.clone();
         tokio::spawn(async move {
-            SubscriptionTask::new(subscpt).run(nodes_tx).await.unwrap();
+            SubscriptionTask::new(subx).run(nodes_tx).await.unwrap();
         });
 
         // start ping task
         let (stats_tx, stats_rx) = channel(1);
-        let local_v2 = self.local_v2.clone();
-        let ssh_v2 = self.ssh_v2.clone();
         let ping_prop = self.prop.tcp_ping.clone();
+        let v2 = self.get_v2(&ping_prop.v2_type);
         tokio::spawn(async move {
-            match &ping_prop.v2_type {
-                V2rayType::Local => {
-                    TcpPingTask::new(ping_prop, local_v2.clone())
-                        .run(nodes_rx, stats_tx)
-                        .await
-                        .unwrap();
-                }
-                V2rayType::Ssh => {
-                    TcpPingTask::new(ping_prop, ssh_v2.clone().expect("not found v2ray ssh"))
-                        .run(nodes_rx, stats_tx)
-                        .await
-                        .unwrap();
-                }
-            };
+            TcpPingTask::new(ping_prop, v2)
+                .run(nodes_rx, stats_tx)
+                .await
+                .unwrap();
         });
 
         let (ips_tx, ips_rx) = channel::<Vec<IpAddr>>(1);
@@ -74,24 +73,13 @@ impl V2rayTaskManager {
         });
 
         // start switch task
-        let local_v2 = self.local_v2.clone();
-        let ssh_v2 = self.ssh_v2.clone();
         let switch_prop = self.prop.switch.clone();
+        let v2 = self.get_v2(&switch_prop.v2_type);
         tokio::spawn(async move {
-            match &switch_prop.v2_type {
-                V2rayType::Local => {
-                    SwitchTask::new(switch_prop, local_v2.clone())
-                        .run(stats_rx, ips_rx)
-                        .await
-                        .unwrap();
-                }
-                V2rayType::Ssh => {
-                    SwitchTask::new(switch_prop, ssh_v2.clone().expect("not found v2ray ssh"))
-                        .run(stats_rx, ips_rx)
-                        .await
-                        .unwrap();
-                }
-            };
+            SwitchTask::new(switch_prop, v2)
+                .run(stats_rx, ips_rx)
+                .await
+                .unwrap();
         });
 
         if let Some(prop) = self.prop.jinkela.take() {

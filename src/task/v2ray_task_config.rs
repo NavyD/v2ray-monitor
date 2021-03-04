@@ -1,7 +1,9 @@
-use std::{fmt::Debug, time::Duration};
+use std::{fmt::Debug, sync::Arc, time::Duration};
 
 use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
+
+use crate::v2ray::new::{LocalV2rayService, SshV2rayService, V2rayService};
 
 use super::find_v2ray_bin_path;
 #[serde(deny_unknown_fields)]
@@ -110,7 +112,9 @@ pub struct SwitchTaskProperty {
     /// 检查错误时重试
     #[serde(default = "default_switch_check_retry")]
     pub check_retry: RetryProperty,
-
+    /// 是否使用代理检查网络可用.默认不使用
+    #[serde(default)]
+    pub check_with_proxy: bool,
     pub filter: SwitchFilterProperty,
     #[serde(default)]
     pub v2_type: V2rayType,
