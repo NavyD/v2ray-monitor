@@ -8,12 +8,11 @@ use std::{
 
 use crate::{
     tcp_ping::TcpPingStatistic,
-    v2ray::{config, new::V2rayService, node::Node},
+    v2ray::{config, node::Node, V2rayService},
 };
 use anyhow::{anyhow, Result};
 
 use double_checked_cell_async::DoubleCheckedCell;
-use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use reqwest::{Client, Proxy};
 use tokio::sync::mpsc::Receiver;
@@ -126,7 +125,7 @@ pub struct SwitchTask {
 }
 
 impl SwitchTask {
-    pub fn new(prop: SwitchTaskProperty, v2: Arc<V2rayService>) -> Self {
+    pub fn new(prop: SwitchTaskProperty, v2: Arc<dyn V2rayService>) -> Self {
         Self {
             stats: Arc::new(Mutex::new(BinaryHeap::new())),
             v2,
@@ -268,14 +267,11 @@ impl SwitchTask {
         }
 
         // 切换节点
-        self.v2
-            .restart_in_background(
-                &self
-                    .v2
-                    .gen_config(&nodes.iter().collect::<Vec<_>>())
-                    .await?,
-            )
+        let config = self
+            .v2
+            .gen_config(&nodes.iter().collect::<Vec<_>>())
             .await?;
+        self.v2.restart_in_background(&config).await?;
 
         last_nodes.replace(nodes);
         last_time.replace(SystemTime::now());
@@ -335,16 +331,16 @@ impl SwitchTask {
 
         let update = |ips: Vec<IpAddr>, check_ips: &Arc<Mutex<HashSet<IpAddr>>>| {
             let mut cips = check_ips.lock();
-            log::debug!(
+            log::trace!(
                 "Received ips len: {}, last ips len: {}",
                 ips.len(),
                 cips.len()
             );
-            log::trace!("updating ips {:?}", ips);
             cips.clear();
             ips.into_iter().for_each(|ip| {
                 cips.insert(ip);
             });
+            log::debug!("updated ips len: {}, {:?}", cips.len(), cips);
         };
 
         let check_ips = self.check_ips.clone();
@@ -426,7 +422,7 @@ impl SwitchTask {
                 .build()
                 .map_err(Into::into)
         }
-        
+
         let client = self
             .check_client
             .get_or_try_init(async { init(self.v2.as_ref(), &self.prop).await })
@@ -543,192 +539,174 @@ fn get_packet_direction(packet: &[u8], ips: Arc<Mutex<HashSet<IpAddr>>>) -> Resu
     }
 }
 
-// #[cfg(test)]
-// mod tests {
+#[cfg(test)]
+mod tests {
 
-//     use once_cell::sync::{Lazy, OnceCell};
-//     use tokio::{
-//         sync::mpsc::channel,
-//         time::{sleep, timeout},
-//     };
+    use once_cell::sync::Lazy;
+    use tokio::{
+        sync::mpsc::channel,
+        time::{sleep, timeout},
+    };
 
-//     use crate::{
-//         task::v2ray_task_config::{PingProperty, V2rayProperty},
-//         tcp_ping,
-//         v2ray::{node, LocalV2ray},
-//     };
+    use crate::{
+        task::v2ray_task_config::{LocalV2rayProperty, PingProperty},
+        tcp_ping,
+        v2ray::{node, LocalV2rayService},
+    };
 
-//     static V2: Lazy<LocalV2ray> = Lazy::new(|| LocalV2ray::new(get_v2ray_prop().unwrap().local));
+    static V2: Lazy<Arc<dyn V2rayService>> = Lazy::new(|| {
+        let contents = r#"
+config_path: tests/data/local-v2-config.json"#;
+        Arc::new(LocalV2rayService::new(
+            serde_yaml::from_str::<LocalV2rayProperty>(contents).unwrap(),
+        ))
+    });
 
-//     use super::*;
-//     use crate::v2ray::ConfigurableV2ray;
+    use super::*;
 
-//     #[tokio::test]
-//     async fn check_network_normal_and_timeout_after_v2_startup() -> Result<()> {
-//         let task = get_updated_task().await?;
-//         let mut node = task.stats.lock().peek().map(|ns| ns.node.clone()).unwrap();
+    #[tokio::test]
+    async fn check_network_normal_and_timeout_after_v2_startup() -> Result<()> {
+        let task = get_updated_task().await?;
+        let mut node = task.stats.lock().peek().map(|ns| ns.node.clone()).unwrap();
 
-//         {
-//             // normal
-//             let config = task.v2.gen_config(&[&node]).await?;
-//             let _c = task.v2.start(&config).await?;
-//             task.check_network().await?;
-//         }
+        {
+            // normal
+            let config = task.v2.gen_config(&[&node]).await?;
+            task.v2.start_in_background(&config).await?;
+            task.check_network().await?;
+            task.v2.stop_all().await?;
+        }
 
-//         node.add.replace("test.add".to_string());
+        node.add.replace("test.add".to_string());
 
-//         let config = task.v2.gen_config(&[&node]).await?;
-//         let _c = task.v2.start(&config).await?;
+        let config = task.v2.gen_config(&[&node]).await?;
+        task.v2.start_in_background(&config).await?;
 
-//         // client设置的超时正常超时退出
-//         let timeout_du = task.prop.check_timeout + Duration::from_millis(50);
-//         let res = timeout(timeout_du, task.check_network()).await?;
-//         assert!(res.is_err());
-//         Ok(())
-//     }
+        // client设置的超时正常超时退出
+        let timeout_du = task.prop.check_timeout + Duration::from_millis(50);
+        let res = timeout(timeout_du, task.check_network()).await?;
+        task.v2.stop_all().await?;
+        assert!(res.is_err());
+        Ok(())
+    }
 
-//     #[tokio::test]
-//     async fn orderly_update_nodes() -> Result<()> {
-//         let task = get_updated_task().await?;
-//         // 测试有序
-//         let first = task.stats.lock().pop().unwrap();
-//         let second = task.stats.lock().pop().unwrap();
-//         assert!(first.tcp_stat < second.tcp_stat);
-//         Ok(())
-//     }
+    #[tokio::test]
+    async fn orderly_update_nodes() -> Result<()> {
+        let task = get_updated_task().await?;
+        // 测试有序
+        let first = task.stats.lock().pop().unwrap();
+        let second = task.stats.lock().pop().unwrap();
+        assert!(first.tcp_stat < second.tcp_stat);
+        Ok(())
+    }
 
-//     // #[tokio::test]
-//     // // #[ignore]
-//     // async fn switch_normal_nodes() -> Result<()> {
-//     //     let task = get_updated_task().await?;
-//     //     assert!(task.check_network().await.is_err());
-//     //     let nodes = task.switch_nodes().await?;
-//     //     assert!(!nodes.is_empty(), "switched nodes has empty");
-//     //     task.check_network().await?;
-//     //     task.v2.stop_all().await?;
-//     //     Ok(())
-//     // }
+    #[tokio::test]
+    // #[ignore]
+    async fn update_weight_after_repush() -> Result<()> {
+        let task = get_updated_task().await?;
+        let old_len = task.stats.lock().len();
+        assert!(old_len >= 2);
+        let first_node = task.stats.lock().peek().unwrap().clone();
+        let last_switched = Some(vec![first_node.node.clone()]);
+        let last_duration = Some(Duration::from_millis(100));
+        task.repush_last(last_switched, last_duration)?;
+        // 第一个节点已被修改
+        assert_ne!(task.stats.lock().peek().unwrap().node, first_node.node);
+        // 不修改数量
+        assert_eq!(task.stats.lock().len(), old_len);
+        // 修改weight
+        let updated_first = task
+            .stats
+            .lock()
+            .iter()
+            .find(|ns| ns.node == first_node.node)
+            .cloned()
+            .unwrap();
+        assert_ne!(updated_first.weight(), first_node.weight());
+        Ok(())
+    }
 
-//     #[tokio::test]
-//     // #[ignore]
-//     async fn update_weight_after_repush() -> Result<()> {
-//         let task = get_updated_task().await?;
-//         let old_len = task.stats.lock().len();
-//         assert!(old_len >= 2);
-//         let first_node = task.stats.lock().peek().unwrap().clone();
-//         let last_switched = Some(vec![first_node.node.clone()]);
-//         let last_duration = Some(Duration::from_millis(100));
-//         task.repush_last(last_switched, last_duration)?;
-//         // 第一个节点已被修改
-//         assert_ne!(task.stats.lock().peek().unwrap().node, first_node.node);
-//         // 不修改数量
-//         assert_eq!(task.stats.lock().len(), old_len);
-//         // 修改weight
-//         let updated_first = task
-//             .stats
-//             .lock()
-//             .iter()
-//             .find(|ns| ns.node == first_node.node)
-//             .cloned()
-//             .unwrap();
-//         assert_ne!(updated_first.weight(), first_node.weight());
-//         Ok(())
-//     }
+    #[tokio::test]
+    #[ignore]
+    async fn run_test() -> Result<()> {
+        let (stats_tx, _stats_rx) = channel(1);
+        let switch = get_switch_prop()?;
+        let nodes = get_node_stats().await?;
 
-//     #[tokio::test]
-//     #[ignore]
-//     async fn run_test() -> Result<()> {
-//         let (stats_tx, _stats_rx) = channel(1);
-//         let switch = get_switch_prop()?;
-//         let nodes = get_node_stats().await?;
+        let task = SwitchTask::new(switch, V2.clone());
+        assert!(task.stats.lock().is_empty());
 
-//         let task = SwitchTask::new(switch, V2.clone());
-//         assert!(task.stats.lock().is_empty());
+        stats_tx.send(nodes.to_vec()).await?;
+        // task.run(stats_rx).await?;
+        sleep(Duration::from_secs(4)).await;
 
-//         stats_tx.send(nodes.to_vec()).await?;
-//         // task.run(stats_rx).await?;
-//         sleep(Duration::from_secs(4)).await;
+        task.check_network().await?;
+        task.v2.stop_all().await?;
+        Ok(())
+    }
 
-//         task.check_network().await?;
-//         task.v2.stop_all().await?;
-//         Ok(())
-//     }
+    async fn get_updated_task() -> Result<SwitchTask> {
+        let (stats_tx, stats_rx) = channel(1);
+        let switch = get_switch_prop()?;
+        let nodes = get_node_stats().await?;
 
-//     async fn get_updated_task() -> Result<SwitchTask<LocalV2ray>> {
-//         let (stats_tx, stats_rx) = channel(1);
-//         let switch = get_switch_prop()?;
-//         let nodes = get_node_stats().await?;
+        let task = SwitchTask::new(switch, V2.clone());
+        assert!(task.stats.lock().is_empty());
 
-//         let task = SwitchTask::new(switch, V2.clone());
-//         assert!(task.stats.lock().is_empty());
+        stats_tx.send(nodes.to_vec()).await?;
+        task.update_node_stats(stats_rx).await?;
+        assert_eq!(task.stats.lock().len(), nodes.len());
+        Ok(task)
+    }
 
-//         stats_tx.send(nodes.to_vec()).await?;
-//         task.update_node_stats(stats_rx).await?;
-//         assert_eq!(task.stats.lock().len(), nodes.len());
-//         Ok(task)
-//     }
+    async fn get_node_stats() -> Result<Vec<(Node, TcpPingStatistic)>> {
+        static NODE_STATS: Lazy<DoubleCheckedCell<Vec<(Node, TcpPingStatistic)>>> =
+            Lazy::new(DoubleCheckedCell::new);
+        let nodes = NODE_STATS
+            .get_or_try_init(async {
+                let nodes = get_nodes().await.unwrap();
+                let v2 = V2.clone();
+                tcp_ping::ping_batch(v2, nodes.clone(), &get_tcp_ping_prop().unwrap())
+                    .await
+                    .map(|(nodes, _)| nodes)
+            })
+            .await?;
+        assert!(nodes.len() > 1, "accessible node len: {}", nodes.len());
+        Ok(nodes.to_vec())
+    }
 
-//     async fn get_node_stats() -> Result<Vec<(Node, TcpPingStatistic)>> {
-//         // static NODE_STATS: OnceCell<Mutex<Vec<(Node, TcpPingStatistic)>>> = OnceCell::new();
-//         // let mut ns = NODE_STATS.get_or_init(|| Mutex::new(vec![])).lock();
-//         // if !ns.is_empty() {
-//         //     return Ok(ns.to_vec());
-//         // }
-//         // let nodes = get_nodes().await?;
-//         // let v2 = V2.clone();
-//         // let (nodes, _) = tcp_ping::ping_batch(v2, nodes.clone(), &get_tcp_ping_prop()?).await?;
-//         // assert!(nodes.len() > 1, "accessible node len: {}", nodes.len());
-//         // *ns = nodes;
-//         // Ok(ns.to_vec())
-//         todo!()
-//     }
+    async fn get_nodes() -> Result<Vec<Node>> {
+        let swith = get_switch_prop()?;
+        let filter = swith.filter.name_regex.as_deref().map(NameRegexFilter::new);
+        node::load_subscription_nodes_from_file("tests/data/v2ray-subscription.txt")
+            .await
+            .map(|nodes| {
+                if let Some(f) = filter {
+                    f.filter(nodes)
+                } else {
+                    nodes
+                }
+            })
+    }
 
-//     async fn get_nodes() -> Result<Vec<Node>> {
-//         let swith = get_switch_prop()?;
-//         let filter = swith.filter.name_regex.as_deref().map(NameRegexFilter::new);
-//         node::load_subscription_nodes_from_file("tests/data/v2ray-subscription.txt")
-//             .await
-//             .map(|nodes| {
-//                 if let Some(f) = filter {
-//                     f.filter(nodes)
-//                 } else {
-//                     nodes
-//                 }
-//             })
-//     }
+    fn get_tcp_ping_prop() -> Result<PingProperty> {
+        let content = r#"
+count: 3
+ping_url: https://www.google.com/gen_204
+timeout: 1s 500ms
+concurr_num: 10"#;
+        serde_yaml::from_str::<PingProperty>(content).map_err(Into::into)
+    }
 
-//     fn get_tcp_ping_prop() -> Result<PingProperty> {
-//         let content = r#"
-// count: 3
-// ping_url: https://www.google.com/gen_204
-// timeout: 1s 500ms
-// concurr_num: 10"#;
-//         serde_yaml::from_str::<PingProperty>(content).map_err(Into::into)
-//     }
-
-//     // #[tokio::test]
-//     // async fn basic() -> Result<()> {
-//     //     let prop = get_switch_prop()?;
-//     //     let v2 = LocalV2ray::new(get_v2ray_prop()?.local);
-//     //     // let _task = SwitchTask::new(prop, v2);
-
-//     //     // task.run().await?;
-//     //     Ok(())
-//     // }
-
-//     fn get_v2ray_prop() -> Result<V2rayProperty> {
-//         let content = r#"{}"#;
-//         serde_yaml::from_str::<V2rayProperty>(content).map_err(Into::into)
-//     }
-
-//     fn get_switch_prop() -> Result<SwitchTaskProperty> {
-//         let content = r#"
-// check_url: https://www.google.com/gen_204
-// check_timeout: 2s
-// filter:
-//     lb_nodes_size: 3
-//     name_regex: "专线"
-//         "#;
-//         serde_yaml::from_str::<SwitchTaskProperty>(content).map_err(Into::into)
-//     }
-// }
+    fn get_switch_prop() -> Result<SwitchTaskProperty> {
+        let content = r#"
+check_url: https://www.google.com/gen_204
+check_timeout: 2s
+check_with_proxy: true
+filter:
+    lb_nodes_size: 3
+    name_regex: "专线"
+        "#;
+        serde_yaml::from_str::<SwitchTaskProperty>(content).map_err(Into::into)
+    }
+}

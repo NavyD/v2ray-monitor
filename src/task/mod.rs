@@ -433,6 +433,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn retry_half() -> Result<()> {
         async fn task() -> Result<()> {
             let d = Duration::from_secs(1);

@@ -10,10 +10,7 @@ use task::{
     v2ray_task_config::{V2rayTaskProperty, V2rayType},
 };
 use tokio::{fs::read_to_string, sync::mpsc::channel};
-use v2ray::{
-    new::{LocalV2rayService, SshV2rayService, V2rayService},
-    LocalV2ray, SshV2ray,
-};
+use v2ray::{LocalV2rayService, SshV2rayService, V2rayService};
 mod client;
 pub mod task;
 mod tcp_ping;
@@ -86,5 +83,33 @@ impl V2rayTaskManager {
             let jinkela = JinkelaCheckinTask::new(prop);
             tokio::spawn(async move { jinkela.run().await.unwrap() });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Once;
+
+    use log::LevelFilter;
+    static INIT: Once = Once::new();
+
+    #[cfg(test)]
+    #[ctor::ctor]
+    fn init() {
+        INIT.call_once(|| {
+            let crate_name = module_path!()
+                .split("::")
+                .collect::<Vec<_>>()
+                .first()
+                .cloned()
+                .expect("get module_path error");
+            env_logger::builder()
+                .is_test(true)
+                .filter_level(LevelFilter::Info)
+                .filter_module(crate_name, LevelFilter::Trace)
+                // .filter_module(&(crate_name.to_string() + "::tcp_ping"), LevelFilter::Debug)
+                .init();
+            // TEST_DIR.set(Path::new("tests/data").to_path_buf());
+        });
     }
 }

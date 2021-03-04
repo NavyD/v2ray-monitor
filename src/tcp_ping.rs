@@ -1,5 +1,5 @@
 use crate::v2ray::config;
-use crate::v2ray::new::{V2rayService, LocalV2rayService};
+use crate::v2ray::V2rayService;
 use crate::{task::v2ray_task_config::*, v2ray::node::Node};
 use std::{
     cmp::Ordering,
@@ -139,7 +139,7 @@ pub async fn ping_batch(
         match ps {
             Ok(ps) => nodes.push((node, ps)),
             Err(e) => {
-                log::debug!(
+                log::trace!(
                     "ignored node name: {:?}, address: {:?}, for received error tcp ping: {}",
                     node.remark,
                     node.add,
@@ -254,13 +254,10 @@ async fn calculate_duration(client: &Client, url: &str) -> Result<Duration> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use once_cell::sync::Lazy;
-    use crate::{task::find_v2ray_bin_path, v2ray::node};
     use super::*;
-
-    #[test]
-    fn basic() {}
+    use crate::{task::find_v2ray_bin_path, v2ray::{LocalV2rayService, node}};
+    use once_cell::sync::Lazy;
+    use std::path::Path;
 
     #[tokio::test]
     async fn ping_test() -> Result<()> {
@@ -338,30 +335,29 @@ filter:
         )
         .unwrap()
     }
-        // #[tokio::test]
-        // async fn tcp_ping_error_when_node_unavailable() -> Result<()> {
-        //     let mut node = get_node();
-        //     node.add = Some("test.host.addr".to_owned());
-    
-        //     let vp = V2rayProperty::default();
-        //     let pp = PingProperty::default();
-        //     let local_port = get_available_port().await?;
-        //     let config = gen_tcp_ping_config(&node, local_port)?;
-        //     let bin_path = vp
-        //         .bin_path
-        //         .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
-    
-        //     let stats = tcp_ping(&bin_path, &config, local_port, &pp).await?;
-    
-        //     assert_eq!(
-        //         stats.durations.len(),
-        //         PingProperty::default().count as usize
-        //     );
-        //     assert_eq!(stats.durations.iter().filter(|d| d.is_some()).count(), 0);
-        //     Ok(())
-        // }
-}
+    // #[tokio::test]
+    // async fn tcp_ping_error_when_node_unavailable() -> Result<()> {
+    //     let mut node = get_node();
+    //     node.add = Some("test.host.addr".to_owned());
 
+    //     let vp = V2rayProperty::default();
+    //     let pp = PingProperty::default();
+    //     let local_port = get_available_port().await?;
+    //     let config = gen_tcp_ping_config(&node, local_port)?;
+    //     let bin_path = vp
+    //         .bin_path
+    //         .unwrap_or_else(|| find_bin_path("v2ray").unwrap());
+
+    //     let stats = tcp_ping(&bin_path, &config, local_port, &pp).await?;
+
+    //     assert_eq!(
+    //         stats.durations.len(),
+    //         PingProperty::default().count as usize
+    //     );
+    //     assert_eq!(stats.durations.iter().filter(|d| d.is_some()).count(), 0);
+    //     Ok(())
+    // }
+}
 
 //     static INIT: Once = Once::new();
 

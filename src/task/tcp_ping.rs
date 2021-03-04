@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     tcp_ping::{self, TcpPingStatistic},
-    v2ray::{node::Node, new::V2rayService},
+    v2ray::{node::Node, V2rayService},
 };
 use anyhow::{anyhow, Result};
 
@@ -73,18 +73,20 @@ impl TcpPingTask {
     ) -> Result<()> {
         self.update_nodes(rx).await?;
         let retry_srv = RetryService::new(self.prop.retry.clone());
-
-        let task = {
-            // let v2 = self.v2.clone();
-            let nodes = self.nodes.clone().lock().clone();
-            let ping_prop = self.prop.ping.clone();
-            // let tx = tx.clone();
-            Arc::new(move || dotask(self.v2.clone(), nodes.clone(), ping_prop.clone(), tx.clone()))
-        };
         let mut interval = time::interval(self.prop.update_interval);
         loop {
+            let nodes = self.nodes.clone().lock().clone();
+            let ping_prop = self.prop.ping.clone();
+            let v2 = self.v2.clone();
+            let tx = tx.clone();
             interval.tick().await;
-            match retry_srv.retry_on(task.clone().as_ref(), false).await {
+            match retry_srv
+                .retry_on(
+                    move || do_ping(v2.clone(), nodes.clone(), ping_prop.clone(), tx.clone()),
+                    false,
+                )
+                .await
+            {
                 Ok(a) => {
                     log::debug!("tcp ping task successfully duration: {:?}", a.1);
                 }
@@ -95,7 +97,7 @@ impl TcpPingTask {
         }
     }
 }
-async fn dotask(
+async fn do_ping(
     v2: Arc<dyn V2rayService>,
     nodes: Vec<Node>,
     ping_prop: PingProperty,
@@ -128,13 +130,20 @@ async fn dotask(
 
 #[cfg(test)]
 mod tests {
-    use crate::{task::{find_v2ray_bin_path, v2ray_task_config::LocalV2rayProperty}, v2ray::{LocalV2ray, new::LocalV2rayService}};
+    use tokio::sync::mpsc::channel;
+
+    use crate::{task::{find_v2ray_bin_path, v2ray_task_config::LocalV2rayProperty}, v2ray::{LocalV2rayService, node}};
 
     use super::*;
 
     #[tokio::test]
     async fn basic() -> Result<()> {
-       
+        let prop = TcpPingTaskProperty::default();
+        let (tx, mut rx) = channel::<Vec<(Node, TcpPingStatistic)>>(1);
+        do_ping(local_v2(), get_nodes().await?, prop.ping, tx).await?;
+        let nodes = rx.recv().await;
+        assert!(nodes.is_some());
+        assert!(!nodes.unwrap().is_empty());
         Ok(())
     }
 
@@ -147,5 +156,12 @@ mod tests {
             bin_path: find_v2ray_bin_path()?,
             config_path: Some("tests/data/local-v2-config.json".to_string()),
         })
+    }
+
+    async fn get_nodes() -> Result<Vec<Node>> {
+        let mut nodes = node::load_subscription_nodes_from_file("tests/data/v2ray-subscription.txt")
+            .await?;
+        nodes.retain(|node| node.remark.as_ref().unwrap().contains("专线"));
+        Ok(nodes)
     }
 }

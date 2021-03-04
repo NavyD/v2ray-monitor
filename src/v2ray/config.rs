@@ -26,7 +26,7 @@ pub enum ConfigError {
 pub fn apply_config_value(
     value: &mut Value,
     nodes: &[&Node],
-    local_port: Option<u16>,
+    port: Option<u16>,
 ) -> Result<String> {
     check_load_balance_nodes(nodes)?;
 
@@ -60,7 +60,7 @@ pub fn apply_config_value(
         json!(node.host.as_ref().expect("not found host")),
     )?;
 
-    if let Some(port) = local_port {
+    if let Some(port) = port {
         apply(value, "inbound.port", json!(port))?;
     } else {
         let port = get_mut(value, "inbound.port")?;
@@ -76,8 +76,8 @@ pub fn apply_port(contents: &str, port: u16) -> Result<String> {
     Ok(value.to_string())
 }
 
-pub fn apply_config(contents: &str, nodes: &[&Node], local_port: Option<u16>) -> Result<String> {
-    apply_config_value(&mut to_value(contents)?, nodes, local_port)
+pub fn apply_config(contents: &str, nodes: &[&Node], port: Option<u16>) -> Result<String> {
+    apply_config_value(&mut to_value(contents)?, nodes, port)
 }
 
 fn get_mut<'a>(contents: &'a mut Value, path: &str) -> Result<&'a mut Value> {
