@@ -71,10 +71,14 @@ async fn check_v2ray_start(out: &mut tokio::process::ChildStdout) -> Result<()> 
 }
 
 async fn exe(cmd: &str) -> Result<String> {
-    exe_arg(cmd, "").await
+    exe_arg(cmd, "", None).await
 }
 
-async fn exe_arg(command: &str, extra_arg: &str) -> Result<String> {
+async fn exe_arg(
+    command: &str,
+    extra_arg: &str,
+    allow_err_status: Option<&[i32]>,
+) -> Result<String> {
     if command.is_empty() {
         return Err(anyhow!("empty cmd"));
     }
@@ -87,14 +91,23 @@ async fn exe_arg(command: &str, extra_arg: &str) -> Result<String> {
     }
     let out = t_cmd.stdout(Stdio::piped()).output().await?;
     if !out.status.success() {
-        let msg = String::from_utf8_lossy(&out.stderr);
-        log::debug!(
-            "execute command failed for {} '{:?}', error: {}",
+        let errmsg = String::from_utf8(out.stderr)?;
+        log::trace!(
+            "execute command `{}` failed: status: {}, stderr: {:?}",
             command,
-            extra_arg,
-            msg
+            out.status,
+            errmsg
         );
-        Err(anyhow!("execute error: {}", msg))
+        if let Some(status) = allow_err_status {
+            if status.contains(&out.status.code().unwrap()) {
+                return Ok(errmsg);
+            }
+        }
+        Err(anyhow!(
+            "execute error: status: {}, msg: {}",
+            out.status,
+            errmsg
+        ))
     } else {
         let s = String::from_utf8(out.stdout)?;
         log::trace!("execute success: {}", s);
@@ -187,6 +200,7 @@ impl V2rayService for LocalV2rayService {
     }
 
     async fn stop_by_port(&self, port: &u16) -> Result<bool> {
+        log::trace!("stopping by port: {}", port);
         let mut child = self.port_children.lock().await.remove(&port);
         if let Some(child) = child.as_mut() {
             log::trace!(
@@ -278,6 +292,7 @@ impl SshV2rayService {
         exe_arg(
             &format!("ssh {}@{}", self.prop.username, self.prop.host),
             sh_cmd,
+            None,
         )
         .await
     }
@@ -330,7 +345,7 @@ impl V2rayService for SshV2rayService {
             "echo '{}' | nohup v2ray -config stdin: &> /dev/null &; jobs -l",
             config,
         );
-        let out = exe_arg(&format!("ssh {}", self.ssh_addr()), &sh_cmd).await?;
+        let out = exe_arg(&format!("ssh {}", self.ssh_addr()), &sh_cmd, None).await?;
         let pid = self.parse_pid_from_jobs_l(&out)?;
         guard.insert(port, pid);
         log::debug!(
@@ -342,8 +357,10 @@ impl V2rayService for SshV2rayService {
     }
 
     async fn stop_by_port(&self, port: &u16) -> Result<bool> {
-        if let Some(pid) = self.port_pids.lock().await.get(port) {
-            self.stop_by_pid(pid).await
+        // 避免死锁 `if let Some(pid) = self.port_pids.lock().await.get(port)`将导致self.stop_by_pid时不释放锁
+        let port = self.port_pids.lock().await.get(port).copied();
+        if let Some(pid) = port {
+            self.stop_by_pid(&pid).await
         } else {
             Ok(false)
         }
@@ -353,7 +370,16 @@ impl V2rayService for SshV2rayService {
     async fn stop_by_pid(&self, pid: &u32) -> Result<bool> {
         let mut lock = self.port_pids.lock().await;
         if let Some((port, pid)) = lock.iter().find(|(_, v)| *v == pid).map(|(k, v)| (*k, *v)) {
-            if let Err(e) = self.ssh_exe(&format!("kill -9 {}", pid)).await {
+            let sh_cmd = format!("kill -9 {}", pid);
+
+            let res = exe_arg(
+                &format!("ssh {}@{}", self.prop.username, self.prop.host),
+                &sh_cmd,
+                Some(&[1]),
+            )
+            .await;
+
+            if let Err(e) = res {
                 Err(anyhow!("stop v2ray {} failed: {} on port {}", pid, e, port))
             } else {
                 lock.remove(&port);
