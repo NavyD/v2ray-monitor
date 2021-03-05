@@ -1,6 +1,6 @@
 [package]
 name = "v2ray-monitor"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["navyd <dhjnavyd@gmail.com>"]
 edition = "2018"
 

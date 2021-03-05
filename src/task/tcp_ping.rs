@@ -132,7 +132,10 @@ async fn do_ping(
 mod tests {
     use tokio::sync::mpsc::channel;
 
-    use crate::{task::{find_v2ray_bin_path, v2ray_task_config::LocalV2rayProperty}, v2ray::{LocalV2rayService, node}};
+    use crate::{
+        task::{find_v2ray_bin_path, v2ray_task_config::LocalV2rayProperty},
+        v2ray::{node, LocalV2rayService},
+    };
 
     use super::*;
 
@@ -159,8 +162,8 @@ mod tests {
     }
 
     async fn get_nodes() -> Result<Vec<Node>> {
-        let mut nodes = node::load_subscription_nodes_from_file("tests/data/v2ray-subscription.txt")
-            .await?;
+        let mut nodes =
+            node::load_subscription_nodes_from_file("tests/data/v2ray-subscription.txt").await?;
         nodes.retain(|node| node.remark.as_ref().unwrap().contains("专线"));
         Ok(nodes)
     }

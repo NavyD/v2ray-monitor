@@ -23,11 +23,7 @@ pub enum ConfigError {
 /// * node.host不一致时
 /// * node.net不是`ws`类型时
 /// * node关键字段中存在None
-pub fn apply_config_value(
-    value: &mut Value,
-    nodes: &[&Node],
-    port: Option<u16>,
-) -> Result<String> {
+pub fn apply_config_value(value: &mut Value, nodes: &[&Node], port: Option<u16>) -> Result<String> {
     check_load_balance_nodes(nodes)?;
 
     let vnext = nodes

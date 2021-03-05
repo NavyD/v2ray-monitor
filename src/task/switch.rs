@@ -15,7 +15,10 @@ use anyhow::{anyhow, Result};
 use double_checked_cell_async::DoubleCheckedCell;
 use parking_lot::Mutex;
 use reqwest::{Client, Proxy};
-use tokio::sync::mpsc::Receiver;
+use tokio::{
+    sync::mpsc::{channel, Receiver},
+    time::sleep,
+};
 
 use super::{
     filter::{Filter, *},
@@ -113,15 +116,16 @@ impl std::cmp::PartialOrd for SwitchNodeStat {
 
 pub type SwitchData = Arc<Mutex<BinaryHeap<SwitchNodeStat>>>;
 
+#[derive(Clone)]
 pub struct SwitchTask {
     stats: SwitchData,
     v2: Arc<dyn V2rayService>,
     pre_filter: Option<Arc<NameRegexFilter>>,
     select_filter: Arc<SwitchSelectFilter>,
     prop: SwitchTaskProperty,
-    check_client: DoubleCheckedCell<Client>,
+    check_client: Arc<DoubleCheckedCell<Client>>,
     check_ips: Arc<Mutex<HashSet<IpAddr>>>,
-    check_retry_srv: RetryService,
+    check_retry_srv: Arc<RetryService>,
 }
 
 impl SwitchTask {
@@ -135,9 +139,9 @@ impl SwitchTask {
                 .as_ref()
                 .map(|s| Arc::new(NameRegexFilter::new(s))),
             select_filter: Arc::new(SwitchSelectFilter::new(prop.filter.lb_nodes_size.into())),
-            check_client: DoubleCheckedCell::new(),
+            check_client: Arc::new(DoubleCheckedCell::new()),
             check_ips: Arc::new(Mutex::new(HashSet::new())),
-            check_retry_srv: RetryService::new(prop.check_retry.clone()),
+            check_retry_srv: Arc::new(RetryService::new(prop.check_retry.clone())),
             prop,
         }
     }
@@ -148,15 +152,15 @@ impl SwitchTask {
         node_stats_rx: Receiver<Vec<(Node, TcpPingStatistic)>>,
         ips_rx: Receiver<Vec<IpAddr>>,
     ) -> Result<()> {
-        tokio::try_join!(
-            self.update_check_ips(ips_rx),
-            self.update_node_stats(node_stats_rx)
-        )?;
+        self.update_node_stats(node_stats_rx).await?;
 
+        // 首次启动v2ray
         self.v2.clean_env().await?;
         if let Err(e) = self.switch(&mut None, &mut None).await {
             return Err(anyhow!("failed switched for the first time: {}", e));
         }
+        // 使用 v2ray代理更新dns，
+        self.update_check_ips(ips_rx).await?;
 
         let monitor = &self.prop.monitor;
         // packet上次数据
@@ -167,12 +171,26 @@ impl SwitchTask {
         let (mut switch_count, mut switch_failed_count, start) = (0, 0, SystemTime::now());
         let mut consecutive_failures = 0;
 
+        let (cc_tx, cc_rx) = channel::<()>(1);
+        self.cyclic_check(cc_rx).await?;
+        let mut last_send = SystemTime::now();
+        let interval = Duration::from_secs(3);
+        if self.prop.check_interval <= interval {
+            log::error!("invalid check_interval: {:?}, min: {:?}", self.prop.check_interval, interval);
+            return Err(anyhow!("invalid check_interval"));
+        }
+        
+        let mut link_rev = self.find_link_receiver()?;
         log::info!(
             "Start monitoring online traffic for interface: {}",
             monitor.ifname
         );
-        let mut link_rev = self.find_link_receiver()?;
         loop {
+            // 避免频繁的发送
+            if last_send.elapsed()? > interval {
+                cc_tx.send(()).await?;
+                last_send = SystemTime::now();
+            }
             match link_rev.next() {
                 Ok(packet) => {
                     if let Ok(is_forword) = get_packet_direction(packet, self.check_ips.clone()) {
@@ -237,6 +255,74 @@ impl SwitchTask {
         }
     }
 
+    /// 在后台检查网络是否活跃。如果不活跃则间隔检查网络可用性，不可用则切换网络。
+    ///
+    /// # Panics
+    ///
+    /// * 如果发生连续的多次切换，表示网络监控功能无效了
+    async fn cyclic_check(&self, mut rx: Receiver<()>) -> Result<()> {
+        let actived = Arc::new(Mutex::new(false));
+        let is_actived = actived.clone();
+
+        tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                *actived.lock() = true;
+            }
+        });
+        let task = self.clone();
+        let interval = task.prop.check_interval;
+        tokio::spawn(async move {
+            log::debug!(
+                "Start to check the network in the background. interval: {:?}",
+                interval
+            );
+            let mut continuous_switch = 0;
+            let continuous_switch_limit = 5;
+            loop {
+                sleep(interval).await;
+                if *is_actived.lock() {
+                    *is_actived.lock() = false;
+                    continuous_switch = 0;
+                    continue;
+                }
+                log::trace!("Checking network for long inactivity");
+                if let Err(e) = task.check_network().await {
+                    log::info!("switching for long inactivity: {}", e);
+                    task.v2
+                        .clean_env()
+                        .await
+                        .unwrap_or_else(|e| panic!("clean env error: {}", e));
+                    continuous_switch += 1;
+                    if continuous_switch >= 2 {
+                        log::warn!("Found continuous interval switching, the network monitoring function may have failed: continuous_switch: {}", 
+                            continuous_switch
+                        );
+                    } else if continuous_switch >= continuous_switch_limit {
+                        log::error!(
+                            "The network monitoring function is invalid: continuous_switch: {}",
+                            continuous_switch
+                        );
+                        panic!("The network monitoring function is invalid");
+                    }
+                    if let Err(e) = task.switch(&mut None, &mut None).await {
+                        log::warn!("switch error: {}", e);
+                        continue;
+                    } else {
+                        *is_actived.lock() = true;
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// 根据上次的节点与切换开始时间重新计算统计数据，切换节点后检查网络可用
+    ///
+    /// # Errors
+    ///
+    /// * 如果过滤节点后为空
+    /// * 如果v2ray获取配置失败 或 切换节点失败
+    /// * 如果切换后多次重试网络不通
     async fn switch(
         &self,
         last_nodes: &mut Option<Vec<Node>>,

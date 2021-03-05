@@ -11,7 +11,7 @@ extern crate pnet;
 
 use dns_lookup::lookup_host;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::net::IpAddr;
 
 use tokio::{sync::mpsc::Sender, time::interval};
@@ -55,6 +55,13 @@ impl HostDnsFlushTask {
             .flat_map(|host| lookup_host(host))
             .flatten()
             .collect::<Vec<_>>();
+        if ips.is_empty() {
+            log::warn!(
+                "dns resolve error: not found any ips for hosts: {:?}",
+                self.prop.hosts
+            );
+            return Err(anyhow!("not found any ips"));
+        }
         log::trace!("sending updated ips len: {}, {:?}", ips.len(), ips);
         tx.send(ips).await.map_err(Into::into)
     }

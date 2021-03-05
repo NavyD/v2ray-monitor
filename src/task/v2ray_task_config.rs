@@ -113,6 +113,9 @@ pub struct SwitchTaskProperty {
     /// 是否使用代理检查网络可用.默认不使用。在使用路由器代理时有用
     #[serde(default)]
     pub check_with_proxy: bool,
+    /// 周期检查网络切换的间隔
+    #[serde(with = "humantime_serde", default = "default_switch_check_interval")]
+    pub check_interval: Duration,
     pub filter: SwitchFilterProperty,
     #[serde(default)]
     pub v2_type: V2rayType,
@@ -125,6 +128,9 @@ pub struct SwitchTaskProperty {
     pub monitor: NetworkMonitorProperty,
 }
 
+fn default_switch_check_interval() -> Duration {
+    Duration::from_secs(60)
+}
 fn default_switch_check_url() -> String {
     "https://www.google.com/gen_204".to_string()
 }

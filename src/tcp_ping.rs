@@ -255,7 +255,10 @@ async fn calculate_duration(client: &Client, url: &str) -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{task::find_v2ray_bin_path, v2ray::{LocalV2rayService, node}};
+    use crate::{
+        task::find_v2ray_bin_path,
+        v2ray::{node, LocalV2rayService},
+    };
     use once_cell::sync::Lazy;
     use std::path::Path;
 
