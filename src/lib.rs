@@ -23,10 +23,11 @@ pub struct V2rayTaskManager {
 }
 
 impl V2rayTaskManager {
-    pub fn new(prop: V2rayTaskProperty) -> Self {
+    pub fn new(mut prop: V2rayTaskProperty) -> Self {
+        let v2ray = prop.v2ray.take().unwrap();
         Self {
-            local_v2: Arc::new(LocalV2rayService::new(prop.v2ray.local.clone())),
-            ssh_v2: Arc::new(SshV2rayService::new(prop.v2ray.ssh.clone().unwrap())),
+            local_v2: Arc::new(LocalV2rayService::new(v2ray.local.clone())),
+            ssh_v2: Arc::new(SshV2rayService::new(v2ray.ssh.unwrap())),
             prop,
         }
     }
@@ -47,14 +48,14 @@ impl V2rayTaskManager {
     pub async fn run(&mut self) {
         // start subscription task
         let (nodes_tx, nodes_rx) = channel(1);
-        let subx = self.prop.subx.clone();
+        let subx = self.prop.subx.take().unwrap();
         tokio::spawn(async move {
             SubscriptionTask::new(subx).run(nodes_tx).await.unwrap();
         });
 
         // start ping task
         let (stats_tx, stats_rx) = channel(1);
-        let ping_prop = self.prop.tcp_ping.clone();
+        let ping_prop = self.prop.tcp_ping.take().unwrap();
         let v2 = self.get_v2(&ping_prop.v2_type);
         tokio::spawn(async move {
             TcpPingTask::new(ping_prop, v2)
@@ -64,13 +65,13 @@ impl V2rayTaskManager {
         });
 
         let (ips_tx, ips_rx) = channel::<Vec<IpAddr>>(1);
-        let dns_task = dns_flush::HostDnsFlushTask::new(self.prop.dns.clone());
+        let dns_task = dns_flush::HostDnsFlushTask::new(self.prop.dns.take().unwrap());
         tokio::spawn(async move {
             dns_task.run(ips_tx).await.unwrap();
         });
 
         // start switch task
-        let switch_prop = self.prop.switch.clone();
+        let switch_prop = self.prop.switch.take().unwrap();
         let v2 = self.get_v2(&switch_prop.v2_type);
         tokio::spawn(async move {
             SwitchTask::new(switch_prop, v2)

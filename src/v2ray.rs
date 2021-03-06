@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use double_checked_cell_async::DoubleCheckedCell;
 use once_cell::sync::OnceCell;
 use regex::Regex;
-use std::{collections::HashMap, path::Path, process::Stdio, sync::Arc};
+use std::{collections::HashMap, path::Path, process::Stdio, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time};
 
 use tokio::{
     fs::read_to_string,
@@ -21,53 +21,81 @@ use tokio::{
 
 use self::node::Node;
 
+/// 控制v2ray启动与停止的服务。
+///
+/// 由于rust当前不支持async drop，出于资源的限制，对于ssh后台启动时不能保持
+/// 一个child，不能自动停止已启动的v2ray，需要主动调用`stop_all`
 #[async_trait]
 pub trait V2rayService: Send + Sync {
+    /// 获取启动v2ray的配置。
     async fn get_config(&self) -> Result<&str>;
 
-    /// 在后台启动v2ray。在V2rayService被drop后应该自动关闭所有由该service启动的v2ray实例
+    /// 在后台启动v2ray并返回其进程pid
     async fn start_in_background(&self, config: &str) -> Result<u32>;
 
-    /// 停止指定port上的v2ray进程。如果不存在也不会返回错误
+    /// 停止指定port上的v2ray进程。如果不存在返回false
     async fn stop_by_port(&self, port: &u16) -> Result<bool>;
 
+    /// 根据pid停止v2ray进程。如果不存在返回false
     async fn stop_by_pid(&self, pid: &u32) -> Result<bool>;
 
+    /// 停止所有由当前实例启动的v2ray进程
     async fn stop_all(&self) -> Result<()>;
 
+    /// 返回一个当前系统可用的端口，用于在config时设置，任意的端口可能导致在tcp ping启动时
+    /// 出现端口占用冲突
     async fn get_available_port(&self) -> Result<u16>;
 
+    /// 清理当前的系统环境，用于保证v2ray启动成功，不会频繁的调用
     async fn clean_env(&self) -> Result<()>;
 
-    /// 在系统中判断指定v2ray pid是否存在
+    /// 在系统中判断指定v2ray pid是否存在。外部环境可能会变化
+    /// 不应该使用缓存
     async fn is_running(&self, pid: u32) -> Result<bool>;
 
     fn get_host(&self) -> &str;
 
+    /// 重启指定config上端口对应的v2ray进程
     async fn restart_in_background(&self, config: &str) -> Result<u32> {
         let port = config::get_port(config)?;
         self.stop_by_port(&port).await?;
         self.start_in_background(config).await
     }
 
+    /// 生成nodes对应的v2ray负载均衡配置。这是一个便利方法
     async fn gen_config(&self, nodes: &[&Node]) -> Result<String> {
         let contents = self.get_config().await?;
         config::apply_config(contents, nodes, None)
     }
 }
 
-async fn check_v2ray_start(out: &mut tokio::process::ChildStdout) -> Result<()> {
-    // 2. check start with output
+/// 通过检查v2ray的warning日志查看v2ray是否启动。如：`[Warning] core: Xray 1.2.4 started`
+///
+/// 如果在 `timeout` 后没有检查到输出started日志返回err
+async fn check_v2ray_start(out: &mut tokio::process::ChildStdout, timeout: Duration) -> Result<()> {
     // 不能使用stdout.take(): error trying to connect: Connection reset by peer (os error 104)
     let mut reader = BufReader::new(out).lines();
-    while let Some(line) = reader.next_line().await? {
-        log::trace!("v2ray: {}", line);
-        // 兼容xray: 2021/02/15 16:40:29 [Warning] core: Xray 1.2.4 started
-        if line.contains("Warning") && line.contains("ay") && line.contains("started") {
-            return Ok(());
+    time::timeout(timeout, async {
+        loop {
+            match reader.next_line().await {
+                Ok(line) => {
+                    if let Some(line) = line {
+                        log::trace!("v2ray: {}", line);
+                        // 兼容xray: 2021/02/15 16:40:29 [Warning] core: Xray 1.2.4 started
+                        if line.contains("Warning")
+                            && line.contains("ay")
+                            && line.contains("started")
+                        {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
         }
-    }
-    Err(anyhow!("v2ray start has some problem"))
+    })
+    .await??;
+    Ok(())
 }
 
 async fn exe(cmd: &str) -> Result<String> {
@@ -158,6 +186,7 @@ impl LocalV2rayService {
                 .stdout
                 .as_mut()
                 .ok_or_else(|| anyhow!("not found command stdout"))?,
+            Duration::from_secs(2),
         )
         .await?;
         log::trace!("v2ray start successful");

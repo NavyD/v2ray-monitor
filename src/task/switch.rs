@@ -119,7 +119,7 @@ pub struct SwitchTask {
     v2: Arc<dyn V2rayService>,
     pre_filter: Option<Arc<NameRegexFilter>>,
     select_filter: Arc<SwitchSelectFilter>,
-    prop: SwitchTaskProperty,
+    prop: Arc<SwitchTaskProperty>,
     check_client: Arc<DoubleCheckedCell<Client>>,
     check_ips: Arc<Mutex<HashSet<IpAddr>>>,
     check_retry_srv: Arc<RetryService>,
@@ -139,11 +139,15 @@ impl SwitchTask {
             check_client: Arc::new(DoubleCheckedCell::new()),
             check_ips: Arc::new(Mutex::new(HashSet::new())),
             check_retry_srv: Arc::new(RetryService::new(prop.check_retry.clone())),
-            prop,
+            prop: Arc::new(prop),
         }
     }
 
-    /// 等待首次接收node stats数据并无限循环切换节点
+    /// 启动switch后台监控任务。启动时将会等待接收`node stats`与`ips`数据并尝试
+    /// 一次切换，成功后开始监控网卡流量自动切换。
+    /// 
+    /// 自动切换只会监控ips中的数据，如果发现ips中多次未收到tcp正确的回复（如tcp RST）
+    /// 则触发切换。如果发生连续的切换失败则会开始清理v2的环境
     pub async fn run(
         &self,
         node_stats_rx: Receiver<Vec<(Node, TcpPingStatistic)>>,
