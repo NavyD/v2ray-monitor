@@ -104,3 +104,24 @@ async fn test() {
 
 * [A practical introduction to async programming in Rust](http://jamesmcm.github.io/blog/2020/05/06/a-practical-introduction-to-async-programming-in-rust/)
 * [Atomic renames and asynchronous destructors #16](https://github.com/jamesmcm/s3rename/issues/16)
+
+### 多个值使用字符串连接
+
+将数组转化为字符串如`[2,1,3]` => `"2 1 3"`，使用slice的方法`join`
+
+```rust
+let s = [3,1,2].iter().map(i32::to_string).collect::<Vec<_>>().join(" ");
+```
+
+参考：
+
+* [How do I concatenate strings?](https://stackoverflow.com/questions/30154541/how-do-i-concatenate-strings)
+
+## v2ray实现
+
+v2ray相关参考：
+
+* [V2Ray 源代码分析](https://medium.com/@jarvisgally/v2ray-%E6%BA%90%E4%BB%A3%E7%A0%81%E5%88%86%E6%9E%90-b4f8db55b0f6)
+* [VMess 协议](https://www.v2fly.org/developer/protocols/vmess.html#%E7%89%88%E6%9C%AC)
+* [VMessPing](https://github.com/v2fly/vmessping)
+* [Trojan-R 高性能的 Trojan 代理](https://github.com/p4gefau1t/trojan-r)
