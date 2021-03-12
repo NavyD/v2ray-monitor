@@ -145,7 +145,7 @@ impl SwitchTask {
 
     /// 启动switch后台监控任务。启动时将会等待接收`node stats`与`ips`数据并尝试
     /// 一次切换，成功后开始监控网卡流量自动切换。
-    /// 
+    ///
     /// 自动切换只会监控ips中的数据，如果发现ips中多次未收到tcp正确的回复（如tcp RST）
     /// 则触发切换。如果发生连续的切换失败则会开始清理v2的环境
     pub async fn run(
@@ -167,7 +167,7 @@ impl SwitchTask {
         // packet上次数据
         let (mut p_timeout_count, mut p_last_time) = (0, None::<SystemTime>);
         // switch上次数据
-        let (mut last_nodes, mut last_time) = (None::<Vec<Node>>, None::<SystemTime>);
+        let (mut switch_last_nodes, mut switch_last_time) = (None::<Vec<Node>>, None::<SystemTime>);
         // 统计数据
         let (mut switch_count, mut switch_failed_count, start) = (0, 0, SystemTime::now());
         let mut consecutive_failures = 0;
@@ -203,21 +203,27 @@ impl SwitchTask {
                                 continue;
                             }
                             // switch limit for elapsed
-                            if let Some(elapsed) = last_time.as_ref().and_then(|t| t.elapsed().ok())
+                            if let Some(elapsed) =
+                                self.prop.limit_interval.as_ref().and_then(|limit| {
+                                    switch_last_time
+                                        .as_ref()
+                                        .and_then(|t| t.elapsed().ok())
+                                        .filter(|elapsed| elapsed < limit)
+                                })
                             {
-                                let limit_interval = self.prop.limit_interval;
-                                if elapsed < limit_interval {
-                                    log::trace!(
-                                        "Ignore frequent switching. elapsed: {:?}, switch limit: {:?}",
-                                        elapsed,
-                                        limit_interval
-                                    );
-                                    continue;
-                                }
+                                log::trace!(
+                                    "Ignore frequent switching. elapsed: {:?}, switch limit: {:?}",
+                                    elapsed,
+                                    self.prop.limit_interval
+                                );
+                                continue;
                             }
                             switch_count += 1;
                             // switch
-                            if let Err(e) = self.switch(&mut last_nodes, &mut last_time).await {
+                            if let Err(e) = self
+                                .switch(&mut switch_last_nodes, &mut switch_last_time)
+                                .await
+                            {
                                 switch_failed_count += 1;
                                 consecutive_failures += 1;
                                 log::warn!("switch error: {}", e);
@@ -388,12 +394,24 @@ impl SwitchTask {
                 .into_iter()
                 .map(|(n, ps)| SwitchNodeStat::new(n, ps))
                 .collect::<BinaryHeap<_>>();
-
             *stats.lock() = if let Some(f) = pre_filter.as_ref() {
                 f.filter(node_stats)
             } else {
                 node_stats
             };
+            if log::log_enabled!(log::Level::Info) {
+                let stats = stats
+                    .lock()
+                    .iter()
+                    .map(|n| {
+                        (
+                            n.node.remark.as_ref().cloned(),
+                            n.tcp_stat.rtt_avg.as_ref().copied(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                log::info!("updated {} node stats: {:?}", stats.len(), stats);
+            }
         };
 
         let stats = self.stats.clone();

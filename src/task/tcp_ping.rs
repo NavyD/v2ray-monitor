@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use super::{
     filter::*,
@@ -113,9 +113,11 @@ async fn do_ping(
         );
         return Err(anyhow!("no any available nodes after tcp ping"));
     }
-    if let Some(err_nodes) = err_nodes {
-        log::info!(
-            "{} error nodes found after ping: {:?}",
+    if log::log_enabled!(log::Level::Debug) {
+        // 输出ping的结果
+        let err_nodes = err_nodes.unwrap();
+        log::debug!(
+            "tcp pings: {} error nodes: {:?}",
             err_nodes.len(),
             err_nodes
                 .iter()
@@ -123,8 +125,8 @@ async fn do_ping(
                 .collect::<Vec<_>>()
         );
     }
-    log::debug!("sending node stats: {}", node_stats.len());
-    tx.send_timeout(node_stats, Duration::from_secs(10)).await?;
+    log::trace!("sending node stats: {}", node_stats.len());
+    tx.send(node_stats).await?;
     Ok(())
 }
 

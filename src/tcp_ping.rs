@@ -150,7 +150,7 @@ pub async fn ping_batch(
         }
     }
     let exe_dura = Instant::now() - start;
-    log::info!(
+    log::debug!(
         "tcp ping {} nodes by {} v2ray takes {:?}.  accessible nodes: {}, error nodes: {}",
         size,
         concurr_num,
@@ -174,6 +174,7 @@ async fn ping_task<'a>(
     let proxy_url = config::get_proxy_url(&config, v2.get_host())?;
     v2.start_in_background(&config).await?;
 
+    // 配置v2ray代理url client
     let client = Proxy::all(&proxy_url)
         .map_or(reqwest::Client::builder(), |proxy| {
             reqwest::Client::builder().proxy(proxy)
@@ -189,11 +190,13 @@ async fn ping_task<'a>(
         proxy_url
     );
     let start = Instant::now();
+    // 并发发送count个 http请求
     for i in 0..count {
         let url = url.clone();
         let tx = tx.clone();
         let client = client.clone();
         tokio::spawn(async move {
+            // 计算对应http任务的时间
             let idx_dura = calculate_duration(&client, &url)
                 .await
                 .map(|d| (i, Some(d)))
@@ -220,7 +223,7 @@ async fn ping_task<'a>(
         durations[i as usize] = du;
     }
     let exe_dura = Instant::now() - start;
-    log::debug!(
+    log::trace!(
         "it takes {:?} to count the data of node: {:?}",
         exe_dura,
         node.remark
@@ -228,6 +231,7 @@ async fn ping_task<'a>(
 
     v2.stop_by_port(&port).await?;
     let ps = TcpPingStatistic::new(durations);
+    // 无法访问的节点
     if !ps.is_accessible() {
         log::trace!(
             "node {:?} cannot be accessed within the timeout: {:?}",

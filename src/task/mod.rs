@@ -98,7 +98,7 @@ impl RetryService {
             }
 
             cur_interval = next_interval(cur_interval);
-            log::debug!(
+            log::trace!(
                 "sleeping {:?} on retries: {}, max retries: {}",
                 cur_interval,
                 cur_retries,
@@ -107,7 +107,7 @@ impl RetryService {
             sleep(cur_interval).await;
         }
         let d = Instant::now() - start;
-        log::debug!(
+        log::trace!(
             "Retry on {} and exit after {} retries, it takes {:?}",
             name,
             cur_retries,
@@ -135,7 +135,7 @@ impl RetryService {
         };
 
         if let Err(e) = &res {
-            log::debug!("retrying execution error: {}", e);
+            log::trace!("retrying execution error: {}", e);
         }
         (ok_or_err && res.is_ok()) || (!ok_or_err && res.is_err())
     }

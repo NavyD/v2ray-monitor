@@ -10,7 +10,7 @@ use regex::Regex;
 use std::{collections::HashMap, path::Path, process::Stdio, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
-use tokio::{sync::Mutex, time};
+use tokio::{process::ChildStdout, sync::Mutex, time};
 
 use tokio::{
     fs::read_to_string,
@@ -72,7 +72,7 @@ pub trait V2rayService: Send + Sync {
 /// 通过检查v2ray的warning日志查看v2ray是否启动。如：`[Warning] core: Xray 1.2.4 started`
 ///
 /// 如果在 `timeout` 后没有检查到输出started日志返回err
-async fn check_v2ray_start(out: &mut tokio::process::ChildStdout, timeout: Duration) -> Result<()> {
+async fn check_v2ray_start(out: &mut ChildStdout, timeout: Duration) -> Result<()> {
     // 不能使用stdout.take(): error trying to connect: Connection reset by peer (os error 104)
     let mut reader = BufReader::new(out).lines();
     time::timeout(timeout, async {
@@ -223,7 +223,7 @@ impl V2rayService for LocalV2rayService {
         // start v2ray
         let child = self.start(config).await?;
         let pid = child.id().ok_or_else(|| anyhow!("not found process id"))?;
-        log::debug!("successfully start v2ray process {} on port {}", pid, port);
+        log::trace!("successfully start v2ray process {} on port {}", pid, port);
         lock.insert(port, child);
         Ok(pid)
     }
@@ -377,7 +377,7 @@ impl V2rayService for SshV2rayService {
         let out = exe_arg(&format!("ssh {}", self.ssh_addr()), &sh_cmd, None).await?;
         let pid = self.parse_pid_from_jobs_l(&out)?;
         guard.insert(port, pid);
-        log::debug!(
+        log::trace!(
             "v2ray successfully started in the background. pid: {}, port: {}",
             pid,
             port

@@ -118,8 +118,8 @@ pub struct SwitchTaskProperty {
     pub v2_type: V2rayType,
 
     /// 限制连续切换节点的间隔
-    #[serde(with = "humantime_serde", default = "default_switch_limit_interval")]
-    pub limit_interval: Duration,
+    #[serde(with = "humantime_serde", default)]
+    pub limit_interval: Option<Duration>,
     /// 监控网卡
     #[serde(default)]
     pub monitor: NetworkMonitorProperty,
@@ -141,9 +141,6 @@ fn default_switch_check_retry() -> RetryProperty {
         half: None,
         once_timeout: None,
     }
-}
-fn default_switch_limit_interval() -> Duration {
-    Duration::from_secs(5)
 }
 
 // ...
